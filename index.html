@@ -36,48 +36,38 @@
 <body class="min-h-screen bg-orange-50 text-slate-800 font-sans pb-16">
 
   <div id="app">
-    <!-- Splash screen / Loading Inicial -->
+    <!-- Tela de carregamento rápido -->
     <div class="flex flex-col items-center justify-center min-h-screen bg-orange-50 p-4">
-      <div class="text-center animate-pulse">
-        <span class="text-6xl">🔥</span>
-        <h2 class="text-2xl font-black text-orange-600 mt-4">Carregando o Arraial...</h2>
-        <p class="text-sm text-slate-500 mt-2">Preparando as barracas e fogueira em tempo real.</p>
+      <div class="text-center">
+        <span class="text-6xl animate-bounce block mb-4">🔥</span>
+        <h2 class="text-2xl font-black text-orange-600">Carregando o Arraial...</h2>
+        <p class="text-sm text-slate-500 mt-2">Preparando as barracas e fogueira.</p>
       </div>
     </div>
   </div>
 
-  <!-- FIREBASE & APPLICATION LOGIC -->
   <script type="module">
-    // Importações dos SDKs do Firebase via CDN
+    // Importações opcionais do Firebase para quando o usuário decidir ativar o sincronismo
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
     import { getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
-    import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 
-    let firebaseConfig = {};
-    let isConfigPending = false;
+    // Credenciais vazias por padrão (O sistema usará o armazenamento local automaticamente se estiver vazio)
+    const firebaseConfig = {
+      apiKey: "",
+      authDomain: "",
+      projectId: "",
+      storageBucket: "",
+      messagingSenderId: "",
+      appId: ""
+    };
 
-    try {
-      if (typeof __firebase_config !== 'undefined') {
-        firebaseConfig = JSON.parse(__firebase_config);
-      } else {
-        // ATENÇÃO: Substitua os dados abaixo pelas credenciais do seu Firebase gratuito!
-        firebaseConfig = {
-          apiKey: "",
-          authDomain: "",
-          projectId: "",
-          storageBucket: "",
-          messagingSenderId: "",
-          appId: ""
-        };
-      }
-    } catch (e) {
-      console.error("Erro ao processar as configurações do Firebase:", e);
-    }
+    // Identifica se temos o Firebase ativo para conectar as pessoas em tempo real
+    const isFirebaseActive = !!(firebaseConfig.apiKey && firebaseConfig.apiKey !== "");
 
-    // Se as chaves estiverem vazias fora do ambiente de testes, aciona o instalador amigável
-    if (!firebaseConfig.apiKey || firebaseConfig.apiKey === "") {
-      isConfigPending = true;
-    }
+    let db = null;
+    let auth = null;
+    const appId = "festa-junina-baixas";
 
     // ESTADO GLOBAL DO APLICATIVO
     const state = {
@@ -91,1227 +81,954 @@
       transactions: [],
       activeTab: localStorage.getItem('junina_role') === 'CAIXA' ? 'vender_fichas' : 'entregar_produtos',
       alertMessage: null,
-      isSyncing: true,
+      isSyncing: false,
       confirmDeleteData: null,
       paymentMethod: 'Dinheiro',
-      newItemName: '',
-      newItemPrice: '5.00',
-      newItemStock: '',
-      newItemCategory: 'Comida',
-      tokenQtyComum: 1,
-      tokenQtyEspecial: 1
+      // Modos de Configuração do Firebase pelo Painel
+      firebaseApiKey: localStorage.getItem('fb_apiKey') || '',
+      firebaseProjectId: localStorage.getItem('fb_projectId') || '',
+      firebaseAppId: localStorage.getItem('fb_appId') || ''
     };
 
-    function renderSetupWizard() {
+    
+    // Fallback de dados iniciais padrão para a festa ficar bonita de cara se não houver dados salvos
+    const defaultItems = [
+      { id: "1", name: "Salsichão", price: 5.00, stock: 50, category: "Comida" },
+      { id: "2", name: "Pastel", price: 5.00, stock: 40, category: "Comida" },
+      { id: "3", name: "Pipoca", price: 5.00, stock: 100, category: "Comida" },
+      { id: "4", name: "Refrigerante", price: 5.00, stock: 60, category: "Bebida" },
+      { id: "5", name: "Água com Gás", price: 7.50, stock: 30, category: "Bebida" }
+    ];
+
+    // Carrega dados iniciais do LocalStorage ou do Mock
+    if (!localStorage.getItem('local_items')) {
+      localStorage.setItem('local_items', JSON.stringify(defaultItems));
+    }
+    if (!localStorage.getItem('local_transactions')) {
+      localStorage.setItem('local_transactions', JSON.stringify([]));
+    }
+
+    // Gerenciador de Banco de Dados Híbrido (Local ou Firebase)
+    const database = {
+      async getItems() {
+        if (isFirebaseActive && db) {
+          // Obtido via OnSnapshot em tempo real
+          return state.items;
+        } else {
+          return JSON.parse(localStorage.getItem('local_items') || '[]');
+        }
+      },
+      async saveItem(item) {
+        if (isFirebaseActive && db) {
+          const itemsColRef = collection(db, 'artifacts', appId, 'public', 'data', 'items');
+          await setDoc(doc(itemsColRef, item.id || crypto.randomUUID()), {
+            name: item.name,
+            price: item.price,
+            stock: item.stock,
+            category: item.category,
+            createdAt: serverTimestamp()
+          });
+        } else {
+          const localItems = JSON.parse(localStorage.getItem('local_items') || '[]');
+          const existsIndex = localItems.findIndex(i => i.id === item.id);
+          if (existsIndex > -1) {
+            localItems[existsIndex] = item;
+          } else {
+            item.id = crypto.randomUUID();
+            localItems.push(item);
+          }
+          localStorage.setItem('local_items', JSON.stringify(localItems));
+          state.items = localItems;
+          render();
+        }
+      },
+      async updateStock(itemId, newStock) {
+        if (isFirebaseActive && db) {
+          const itemDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'items', itemId);
+          await updateDoc(itemDocRef, { stock: parseInt(newStock) });
+        } else {
+          const localItems = JSON.parse(localStorage.getItem('local_items') || '[]');
+          const item = localItems.find(i => i.id === itemId);
+          if (item) {
+            item.stock = parseInt(newStock);
+            localStorage.setItem('local_items', JSON.stringify(localItems));
+            state.items = localItems;
+            render();
+          }
+        }
+      },
+      async deleteItem(itemId) {
+        if (isFirebaseActive && db) {
+          const itemDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'items', itemId);
+          await deleteDoc(itemDocRef);
+        } else {
+          const localItems = JSON.parse(localStorage.getItem('local_items') || '[]');
+          const filtered = localItems.filter(i => i.id !== itemId);
+          localStorage.setItem('local_items', JSON.stringify(filtered));
+          state.items = filtered;
+          render();
+        }
+      },
+      async addTransaction(tx) {
+        if (isFirebaseActive && db) {
+          const transColRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+          await addDoc(transColRef, {
+            ...tx,
+            timestamp: serverTimestamp()
+          });
+        } else {
+          const localTx = JSON.parse(localStorage.getItem('local_transactions') || '[]');
+          tx.id = crypto.randomUUID();
+          tx.timestamp = { seconds: Math.floor(Date.now() / 1000) };
+          localTx.unshift(tx);
+          localStorage.setItem('local_transactions', JSON.stringify(localTx));
+          state.transactions = localTx;
+          render();
+        }
+      }
+    };
+
+    window.showAlert = function(text, type = 'info') {
+      state.alertMessage = { text, type };
+      render();
+      setTimeout(() => {
+        state.alertMessage = null;
+        render();
+      }, 4000);
+    };
+
+    // Tenta conectar ao Firebase caso configurado
+    if (isFirebaseActive) {
+      try {
+        const fbApp = initializeApp(firebaseConfig);
+        auth = getAuth(fbApp);
+        db = getFirestore(fbApp);
+        
+        state.isSyncing = true;
+        
+        signInAnonymously(auth).then(() => {
+          onAuthStateChanged(auth, (currentUser) => {
+            state.user = currentUser;
+            if (currentUser) {
+              // Escuta em tempo real do Firebase
+              const itemsCol = collection(db, 'artifacts', appId, 'public', 'data', 'items');
+              const transCol = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+
+              onSnapshot(itemsCol, (snapshot) => {
+                const list = [];
+                snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
+                list.sort((a, b) => a.name.localeCompare(b.name));
+                state.items = list;
+                state.isSyncing = false;
+                render();
+              });
+
+              onSnapshot(transCol, (snapshot) => {
+                const list = [];
+                snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
+                list.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
+                state.transactions = list;
+                render();
+              });
+            }
+          });
+        });
+      } catch (e) {
+        console.error("Falha ao inicializar o Firebase:", e);
+        isFirebaseActive = false;
+      }
+    } else {
+      // Carregamento rápido offline
+      state.items = JSON.parse(localStorage.getItem('local_items') || '[]');
+      state.transactions = JSON.parse(localStorage.getItem('local_transactions') || '[]');
+    }
+
+    window.handleSaveOperator = async (e) => {
+      e.preventDefault();
+      const inputName = document.getElementById('inputSellerName').value.trim();
+      if (!inputName) {
+        window.showAlert("Por favor, digite seu nome ou barraca!", "warning");
+        return;
+      }
+
+      state.sellerName = inputName;
+      state.operatorRole = state.tempRole;
+      state.isSettingName = false;
+
+      localStorage.setItem('junina_seller_name', inputName);
+      localStorage.setItem('junina_role', state.tempRole);
+
+      if (state.operatorRole === 'CAIXA') {
+        state.activeTab = 'vender_fichas';
+      } else if (state.operatorRole === 'BARRACA') {
+        state.activeTab = 'entregar_produtos';
+      } else {
+        state.activeTab = 'painel';
+      }
+
+      window.showAlert(`Perfil definido: ${inputName}! 🤠`, "success");
+      render();
+    };
+
+    window.selectTempRole = (role) => {
+      state.tempRole = role;
+      render();
+    };
+
+    window.handleChangeRole = () => {
+      state.tempSellerName = state.sellerName;
+      state.tempRole = state.operatorRole;
+      state.isSettingName = true;
+      render();
+    };
+
+    window.setActiveTab = (tab) => {
+      state.activeTab = tab;
+      render();
+    };
+
+    window.setPaymentMethod = (method) => {
+      state.paymentMethod = method;
+      render();
+    };
+
+    window.handleSellTokens = async (type, qty) => {
+      if (!state.sellerName) {
+        state.isSettingName = true;
+        render();
+        return;
+      }
+
+      const q = parseInt(qty);
+      if (q <= 0 || isNaN(q)) {
+        window.showAlert("Quantidade inválida!", "error");
+        return;
+      }
+
+      const priceUnit = type === 'Comum' ? 5.00 : 7.50;
+      const totalValue = priceUnit * q;
+
+      await database.addTransaction({
+        type: 'VENDA_FICHA',
+        tokenType: type,
+        qty: q,
+        price: priceUnit,
+        total: totalValue,
+        paymentMethod: state.paymentMethod,
+        sellerName: state.sellerName
+      });
+
+      window.showAlert(`🎟️ Vendido: ${q}x Ficha ${type} (R$ ${totalValue.toFixed(2)})!`, "success");
+    };
+
+    window.handleDeliverProduct = async (itemId, qtyToDeliver) => {
+      if (!state.sellerName) {
+        state.isSettingName = true;
+        render();
+        return;
+      }
+
+      const item = state.items.find(i => i.id === itemId);
+      if (!item) return;
+
+      if (item.stock <= 0) {
+        window.showAlert(`🚫 Estoque físico ESGOTADO para: ${item.name}!`, "error");
+        return;
+      }
+
+      if (item.stock < qtyToDeliver) {
+        window.showAlert(`⚠️ Apenas ${item.stock} unidades disponíveis no estoque!`, "warning");
+        return;
+      }
+
+      const tokenTypeNeeded = parseFloat(item.price) === 7.50 ? 'Especial' : 'Comum';
+
+      // Deduz o estoque
+      const updatedStock = item.stock - qtyToDeliver;
+      await database.updateStock(item.id, updatedStock);
+
+      // Registra a transação de baixa
+      await database.addTransaction({
+        type: 'ENTREGA_PRODUTO',
+        itemId: item.id,
+        itemName: item.name,
+        qty: qtyToDeliver,
+        tokenTypeUsed: tokenTypeNeeded,
+        price: parseFloat(item.price),
+        total: parseFloat(item.price) * qtyToDeliver,
+        sellerName: state.sellerName
+      });
+
+      window.showAlert(`✅ Baixa registrada! ${qtyToDeliver}x "${item.name}" entregue.`, "success");
+    };
+
+    window.handleAddNewItem = async (e) => {
+      e.preventDefault();
+      const name = document.getElementById('newItemName').value.trim();
+      const price = parseFloat(document.getElementById('newItemPrice').value);
+      const stock = parseInt(document.getElementById('newItemStock').value);
+      const category = document.getElementById('newItemCategory').value;
+
+      if (!name || isNaN(price) || isNaN(stock) || stock < 0) {
+        window.showAlert("Preencha todos os campos corretamente!", "warning");
+        return;
+      }
+
+      await database.saveItem({
+        id: crypto.randomUUID(),
+        name,
+        price,
+        stock,
+        category
+      });
+
+      window.showAlert(`🎉 "${name}" inserido com sucesso!`, "success");
+      document.getElementById('newItemName').value = '';
+      document.getElementById('newItemStock').value = '';
+    };
+
+    window.handleUpdateStockDirectly = async (itemId, newStockValue, itemName) => {
+      await database.updateStock(itemId, newStockValue);
+      window.showAlert(`Estoque de "${itemName}" ajustado para ${newStockValue}.`, "info");
+    };
+
+    window.handleDeleteItem = (itemId, itemName) => {
+      state.confirmDeleteData = { id: itemId, name: itemName };
+      render();
+    };
+
+    window.closeDeleteModal = () => {
+      state.confirmDeleteData = null;
+      render();
+    };
+
+    window.executeDeleteItem = async () => {
+      if (!state.confirmDeleteData) return;
+      await database.deleteItem(state.confirmDeleteData.id);
+      window.showAlert(`🗑️ "${state.confirmDeleteData.name}" removido do cardápio.`, "info");
+      state.confirmDeleteData = null;
+      render();
+    };
+
+    function render() {
       const appEl = document.getElementById('app');
+      
+      // Métrica de cálculos
+      const totalFichasComunsVendidas = state.transactions
+        .filter(t => t.type === 'VENDA_FICHA' && t.tokenType === 'Comum')
+        .reduce((sum, t) => sum + (t.qty || 0), 0);
+
+      const totalFichasEspeciaisVendidas = state.transactions
+        .filter(t => t.type === 'VENDA_FICHA' && t.tokenType === 'Especial')
+        .reduce((sum, t) => sum + (t.qty || 0), 0);
+
+      const totalFichasComunsEntregues = state.transactions
+        .filter(t => t.type === 'ENTREGA_PRODUTO' && t.tokenTypeUsed === 'Comum')
+        .reduce((sum, t) => sum + (t.qty || 0), 0);
+
+      const totalFichasEspeciaisEntregues = state.transactions
+        .filter(t => t.type === 'ENTREGA_PRODUTO' && t.tokenTypeUsed === 'Especial')
+        .reduce((sum, t) => sum + (t.qty || 0), 0);
+
+      const revenueCaixa = state.transactions
+        .filter(t => t.type === 'VENDA_FICHA')
+        .reduce((sum, t) => sum + (t.total || 0), 0);
+
+      const totalPaymentDinheiro = state.transactions
+        .filter(t => t.type === 'VENDA_FICHA' && t.paymentMethod === 'Dinheiro')
+        .reduce((sum, t) => sum + (t.total || 0), 0);
+
+      const totalPaymentPIX = state.transactions
+        .filter(t => t.type === 'VENDA_FICHA' && t.paymentMethod === 'PIX')
+        .reduce((sum, t) => sum + (t.total || 0), 0);
+
+      const totalPaymentCartao = state.transactions
+        .filter(t => t.type === 'VENDA_FICHA' && t.paymentMethod === 'Cartão')
+        .reduce((sum, t) => sum + (t.total || 0), 0);
+
+      const fichasComunsEmCirculacao = Math.max(0, totalFichasComunsVendidas - totalFichasComunsEntregues);
+      const fichasEspeciaisEmCirculacao = Math.max(0, totalFichasEspeciaisVendidas - totalFichasEspeciaisEntregues);
+
+      const lowStockItems = state.items.filter(item => item.stock > 0 && item.stock <= 5);
+      const outOfStockItems = state.items.filter(item => item.stock === 0);
+
       appEl.innerHTML = `
-        <div class="max-w-xl mx-auto px-4 py-8">
-          <div class="bg-white rounded-3xl border-2 border-amber-400 p-6 shadow-xl text-center">
-            <span class="text-6xl">🔥</span>
-            <h1 class="text-2xl font-black text-orange-600 mt-4 font-serif">Sua Fogueira está quase acesa!</h1>
-            <p class="text-sm text-slate-600 mt-2">
-              Para sincronizar o estoque em tempo real entre os 4 celulares, o sistema precisa de um banco de dados gratuito do Firebase.
-            </p>
-
-            <div class="mt-6 text-left space-y-4">
-              <h2 class="text-xs font-bold text-slate-500 uppercase tracking-wider border-b border-amber-100 pb-2">Passo a Passo Rápido (3 Minutos):</h2>
-              
-              <div class="flex gap-3">
-                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-100 text-xs font-bold text-amber-800">1</span>
-                <p class="text-xs text-slate-600">
-                  Acesse o <a href="https://console.firebase.google.com/" target="_blank" class="text-orange-600 underline font-bold">Firebase Console</a>, entre com sua conta Google e clique em <strong>"Adicionar Projeto"</strong> (chame de "Festa Junina").
-                </p>
-              </div>
-
-              <div class="flex gap-3">
-                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-100 text-xs font-bold text-amber-800">2</span>
-                <p class="text-xs text-slate-600">
-                  No painel do projeto, clique no ícone de <strong>Web (&lt;/&gt;)</strong> para registrar um app. Ele vai te dar um código com as credenciais (<code>firebaseConfig</code>).
-                </p>
-              </div>
-
-              <div class="flex gap-3">
-                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-100 text-xs font-bold text-amber-800">3</span>
-                <p class="text-xs text-slate-600">
-                  No menu lateral esquerdo do Firebase, clique em <strong>Build > Firestore Database</strong>, crie o banco em <strong>Modo de Teste</strong> e ative. Clique também em <strong>Build > Authentication</strong>, ative o provedor <strong>Anônimo (Anonymous)</strong>.
-                </p>
-              </div>
-
-              <div class="flex gap-3">
-                <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-amber-100 text-xs font-bold text-amber-800">4</span>
-                <p class="text-xs text-slate-600">
-                  Abra seu arquivo <code>index.html</code> no seu repositório do GitHub, clique no ícone do lápis para editar, procure pela linha <strong>51</strong> e cole as chaves que você copiou do passo 2. Salve e o app funcionará na hora!
-                </p>
-              </div>
+        <!-- Banner de Festa Junina -->
+        <div class="bg-gradient-to-r from-amber-600 via-orange-500 to-red-600 text-white relative overflow-hidden shadow-lg">
+          <div class="absolute top-0 left-0 w-full flex justify-around opacity-40 select-none pointer-events-none text-lg">
+            <span>🔺</span><span class="text-yellow-300">🔻</span>
+            <span>🔺</span><span class="text-yellow-200">🔻</span>
+            <span>🔺</span><span class="text-yellow-300">🔻</span>
+            <span>🔺</span><span class="text-yellow-100">🔻</span>
+            <span>🔺</span><span class="text-yellow-300">🔻</span>
+          </div>
+          
+          <div class="max-w-4xl mx-auto px-4 py-6 text-center relative z-10">
+            <div class="flex items-center justify-center gap-2 mb-1">
+              <span class="text-3xl animate-bounce">🔥</span>
+              <h1 class="text-2xl md:text-4xl font-extrabold tracking-tight font-serif text-yellow-300 drop-shadow-md">
+                ARRAIAL CONCILIA SYNC
+              </h1>
+              <span class="text-3xl animate-bounce">🌽</span>
             </div>
-
-            <div class="mt-6 bg-amber-50 p-4 rounded-2xl text-left border border-amber-200">
-              <p class="text-[10px] uppercase font-bold text-amber-800 tracking-wider">Substitua esta seção no seu index.html:</p>
-              <pre class="text-[10px] bg-slate-900 text-green-400 p-3 rounded-lg mt-1 overflow-x-auto font-mono">
-firebaseConfig = {
-  apiKey: "SUA_API_KEY",
-  authDomain: "SEU_AUTH_DOMAIN",
-  projectId: "SEU_PROJECT_ID",
-  storageBucket: "SEU_STORAGE_BUCKET",
-  messagingSenderId: "SEU_SENDER_ID",
-  appId: "SEU_APP_ID"
-};</pre>
-            </div>
-            
-            <p class="text-[10px] text-slate-400 mt-4">
-              Dúvidas? Deixe essa tela aberta e siga os passos no computador para liberar o acesso das barracas!
+            <p class="text-xs md:text-sm text-orange-100 font-bold tracking-widest uppercase">
+              Controle de Caixas, Fichas de Valores e Baixas Rápidas de Estoque
             </p>
           </div>
         </div>
-      `;
-    }
 
-    if (isConfigPending) {
-      renderSetupWizard();
-    } else {
-      // Inicia o app se as credenciais existirem
-      const app = initializeApp(firebaseConfig);
-      const auth = getAuth(app);
-      const db = getFirestore(app);
-      const appId = typeof __app_id !== 'undefined' ? __app_id : 'festa-junina-baixas';
-
-      window.showAlert = function(text, type = 'info') {
-        state.alertMessage = { text, type };
-        render();
-        setTimeout(() => {
-          state.alertMessage = null;
-          render();
-        }, 4000);
-      }
-
-      async function initAuthWithRetry() {
-        let delay = 1000;
-        for (let attempt = 1; attempt <= 5; attempt++) {
-          try {
-            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-              await signInWithCustomToken(auth, __initial_auth_token);
-            } else {
-              await signInAnonymously(auth);
-            }
-            return;
-          } catch (error) {
-            if (attempt === 5) {
-              window.showAlert("Erro crítico de conexão com o banco do Firebase.", "error");
-            }
-            await new Promise(resolve => setTimeout(resolve, delay));
-            delay *= 2;
-          }
-        }
-      }
-
-      function startDatabaseSubscriptions() {
-        if (!state.user) return;
-
-        state.isSyncing = true;
-        render();
-
-        const itemsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'items');
-        const transactionsCollection = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-
-        onSnapshot(itemsCollection, 
-          (snapshot) => {
-            const list = [];
-            snapshot.forEach((doc) => {
-              list.push({ id: doc.id, ...doc.data() });
-            });
-            list.sort((a, b) => a.name.localeCompare(b.name));
-            state.items = list;
-            state.isSyncing = false;
-            render();
-          },
-          (error) => {
-            console.error("Erro ao sincronizar produtos:", error);
-            window.showAlert("Verifique se as regras do Firestore Database estão em modo teste públicos.", "error");
-          }
-        );
-
-        onSnapshot(transactionsCollection,
-          (snapshot) => {
-            const list = [];
-            snapshot.forEach((doc) => {
-              list.push({ id: doc.id, ...doc.data() });
-            });
-            list.sort((a, b) => {
-              const timeA = a.timestamp?.seconds || 0;
-              const timeB = b.timestamp?.seconds || 0;
-              return timeB - timeA;
-            });
-            state.transactions = list;
-            render();
-          },
-          (error) => {
-            console.error("Erro ao sincronizar transações:", error);
-          }
-        );
-      }
-
-      window.handleSaveOperator = async (e) => {
-        e.preventDefault();
-        const inputName = document.getElementById('inputSellerName').value.trim();
-        if (!inputName) {
-          window.showAlert("Por favor, digite seu nome ou barraca!", "warning");
-          return;
-        }
-
-        state.sellerName = inputName;
-        state.operatorRole = state.tempRole;
-        state.isSettingName = false;
-
-        localStorage.setItem('junina_seller_name', inputName);
-        localStorage.setItem('junina_role', state.tempRole);
-
-        if (state.operatorRole === 'CAIXA') {
-          state.activeTab = 'vender_fichas';
-        } else if (state.operatorRole === 'BARRACA') {
-          state.activeTab = 'entregar_produtos';
-        } else {
-          state.activeTab = 'painel';
-        }
-
-        window.showAlert(`Perfil definido: ${inputName}! 🤠`, "success");
-        render();
-      };
-
-      window.selectTempRole = (role) => {
-        state.tempRole = role;
-        render();
-      };
-
-      window.handleChangeRole = () => {
-        state.tempSellerName = state.sellerName;
-        state.tempRole = state.operatorRole;
-        state.isSettingName = true;
-        render();
-      };
-
-      window.setActiveTab = (tab) => {
-        state.activeTab = tab;
-        render();
-      };
-
-      window.setPaymentMethod = (method) => {
-        state.paymentMethod = method;
-        render();
-      };
-
-      window.handleSellTokens = async (type, qty) => {
-        if (!state.sellerName) {
-          state.isSettingName = true;
-          render();
-          return;
-        }
-
-        const q = parseInt(qty);
-        if (q <= 0 || isNaN(q)) {
-          window.showAlert("Quantidade inválida!", "error");
-          return;
-        }
-
-        const priceUnit = type === 'Comum' ? 5.00 : 7.50;
-        const totalValue = priceUnit * q;
-
-        try {
-          const transColRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-          await addDoc(transColRef, {
-            type: 'VENDA_FICHA',
-            tokenType: type,
-            qty: q,
-            price: priceUnit,
-            total: totalValue,
-            paymentMethod: state.paymentMethod,
-            sellerName: state.sellerName,
-            timestamp: serverTimestamp()
-          });
-          window.showAlert(`🎟️ Vendido: ${q}x Ficha ${type} (R$ ${totalValue.toFixed(2)})!`, "success");
-        } catch (error) {
-          console.error(error);
-          window.showAlert("Erro ao salvar a venda de fichas no banco.", "error");
-        }
-      };
-
-      window.handleDeliverProduct = async (itemId, qtyToDeliver) => {
-        if (!state.sellerName) {
-          state.isSettingName = true;
-          render();
-          return;
-        }
-
-        const item = state.items.find(i => i.id === itemId);
-        if (!item) return;
-
-        if (item.stock <= 0) {
-          window.showAlert(`🚫 Estoque físico ESGOTADO para: ${item.name}!`, "error");
-          return;
-        }
-
-        if (item.stock < qtyToDeliver) {
-          window.showAlert(`⚠️ Apenas ${item.stock} itens físicos disponíveis no estoque!`, "warning");
-          return;
-        }
-
-        const tokenTypeNeeded = parseFloat(item.price) === 7.50 ? 'Especial' : 'Comum';
-
-        try {
-          const itemDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'items', item.id);
-          const transColRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-
-          await updateDoc(itemDocRef, {
-            stock: increment(-qtyToDeliver)
-          });
-
-          await addDoc(transColRef, {
-            type: 'ENTREGA_PRODUTO',
-            itemId: item.id,
-            itemName: item.name,
-            qty: qtyToDeliver,
-            tokenTypeUsed: tokenTypeNeeded,
-            price: parseFloat(item.price),
-            total: parseFloat(item.price) * qtyToDeliver,
-            sellerName: state.sellerName,
-            timestamp: serverTimestamp()
-          });
-
-          window.showAlert(`✅ Baixa registrada! ${qtyToDeliver}x "${item.name}" entregue.`, "success");
-        } catch (error) {
-          console.error(error);
-          window.showAlert("Erro de comunicação com o banco para realizar a entrega.", "error");
-        }
-      };
-
-      window.handleAddNewItem = async (e) => {
-        e.preventDefault();
-        const name = document.getElementById('newItemName').value.trim();
-        const price = parseFloat(document.getElementById('newItemPrice').value);
-        const stock = parseInt(document.getElementById('newItemStock').value);
-        const category = document.getElementById('newItemCategory').value;
-
-        if (!name || isNaN(price) || isNaN(stock) || stock < 0) {
-          window.showAlert("Preencha todos os campos corretamente!", "warning");
-          return;
-        }
-
-        try {
-          const itemsColRef = collection(db, 'artifacts', appId, 'public', 'data', 'items');
-          const customId = crypto.randomUUID();
-          await setDoc(doc(itemsColRef, customId), {
-            name,
-            price,
-            stock,
-            category,
-            createdAt: serverTimestamp()
-          });
-          window.showAlert(`🎉 "${name}" inserido com sucesso!`, "success");
-          
-          document.getElementById('newItemName').value = '';
-          document.getElementById('newItemStock').value = '';
-        } catch (error) {
-          console.error(error);
-          window.showAlert("Erro ao cadastrar produto.", "error");
-        }
-      };
-
-      window.handleUpdateStockDirectly = async (itemId, newStockValue, itemName) => {
-        const val = parseInt(newStockValue);
-        if (isNaN(val) || val < 0) return;
-
-        try {
-          const itemDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'items', itemId);
-          await updateDoc(itemDocRef, { stock: val });
-          window.showAlert(`Estoque de "${itemName}" ajustado para ${val}.`, "info");
-        } catch (error) {
-          window.showAlert("Erro ao atualizar estoque.", "error");
-        }
-      };
-
-      window.handleDeleteItem = (itemId, itemName) => {
-        state.confirmDeleteData = { id: itemId, name: itemName };
-        render();
-      };
-
-      window.closeDeleteModal = () => {
-        state.confirmDeleteData = null;
-        render();
-      };
-
-      window.executeDeleteItem = async () => {
-        if (!state.confirmDeleteData) return;
-        try {
-          const itemDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'items', state.confirmDeleteData.id);
-          await deleteDoc(itemDocRef);
-          window.showAlert(`🗑️ "${state.confirmDeleteData.name}" removido do cardápio.`, "info");
-        } catch (error) {
-          window.showAlert("Erro ao deletar produto.", "error");
-        } finally {
-          state.confirmDeleteData = null;
-          render();
-        }
-      };
-
-      initAuthWithRetry();
-      onAuthStateChanged(auth, (currentUser) => {
-        state.user = currentUser;
-        if (currentUser) {
-          startDatabaseSubscriptions();
-        }
-      });
-
-      function render() {
-        const appEl = document.getElementById('app');
-        
-        const totalFichasComunsVendidas = state.transactions
-          .filter(t => t.type === 'VENDA_FICHA' && t.tokenType === 'Comum')
-          .reduce((sum, t) => sum + (t.qty || 0), 0);
-
-        const totalFichasEspeciaisVendidas = state.transactions
-          .filter(t => t.type === 'VENDA_FICHA' && t.tokenType === 'Especial')
-          .reduce((sum, t) => sum + (t.qty || 0), 0);
-
-        const totalFichasComunsEntregues = state.transactions
-          .filter(t => t.type === 'ENTREGA_PRODUTO' && t.tokenTypeUsed === 'Comum')
-          .reduce((sum, t) => sum + (t.qty || 0), 0);
-
-        const totalFichasEspeciaisEntregues = state.transactions
-          .filter(t => t.type === 'ENTREGA_PRODUTO' && t.tokenTypeUsed === 'Especial')
-          .reduce((sum, t) => sum + (t.qty || 0), 0);
-
-        const revenueCaixa = state.transactions
-          .filter(t => t.type === 'VENDA_FICHA')
-          .reduce((sum, t) => sum + (t.total || 0), 0);
-
-        const totalPaymentDinheiro = state.transactions
-          .filter(t => t.type === 'VENDA_FICHA' && t.paymentMethod === 'Dinheiro')
-          .reduce((sum, t) => sum + (t.total || 0), 0);
-
-        const totalPaymentPIX = state.transactions
-          .filter(t => t.type === 'VENDA_FICHA' && t.paymentMethod === 'PIX')
-          .reduce((sum, t) => sum + (t.total || 0), 0);
-
-        const totalPaymentCartao = state.transactions
-          .filter(t => t.type === 'VENDA_FICHA' && t.paymentMethod === 'Cartão')
-          .reduce((sum, t) => sum + (t.total || 0), 0);
-
-        const fichasComunsEmCirculacao = Math.max(0, totalFichasComunsVendidas - totalFichasComunsEntregues);
-        const fichasEspeciaisEmCirculacao = Math.max(0, totalFichasEspeciaisVendidas - totalFichasEspeciaisEntregues);
-
-        const lowStockItems = state.items.filter(item => item.stock > 0 && item.stock <= 5);
-        const outOfStockItems = state.items.filter(item => item.stock === 0);
-
-        appEl.innerHTML = `
-          <!-- Festive Top Banner -->
-          <div class="bg-gradient-to-r from-amber-600 via-orange-500 to-red-600 text-white relative overflow-hidden shadow-lg">
-            <div class="absolute top-0 left-0 w-full flex justify-around opacity-40 select-none pointer-events-none text-lg">
-              <span>🔺</span><span class="text-yellow-300">🔻</span>
-              <span>🔺</span><span class="text-yellow-200">🔻</span>
-              <span>🔺</span><span class="text-yellow-300">🔻</span>
-              <span>🔺</span><span class="text-yellow-100">🔻</span>
-              <span>🔺</span><span class="text-yellow-300">🔻</span>
+        <!-- Alerta de Conexão Local / Offline -->
+        <div class="bg-amber-100 border-b border-amber-200 py-2 px-4 text-xs">
+          <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-2 text-slate-700">
+            <div class="flex items-center gap-2 font-bold">
+              <span class="relative flex h-2.5 w-2.5">
+                <span class="relative inline-flex rounded-full h-2.5 w-2.5 ${isFirebaseActive ? 'bg-emerald-500' : 'bg-orange-500 animate-pulse'}"></span>
+              </span>
+              <span>
+                ${isFirebaseActive 
+                  ? '🌐 Sincronizado em Nuvem (Multi-Celulares Ativo)' 
+                  : '📲 Modo Local (Dados salvos neste aparelho. Sem complicação com Firebase!)'}
+              </span>
             </div>
             
-            <div class="max-w-4xl mx-auto px-4 py-6 text-center relative z-10">
-              <div class="flex items-center justify-center gap-2 mb-1">
-                <span class="text-3xl animate-bounce">🔥</span>
-                <h1 class="text-2xl md:text-4xl font-extrabold tracking-tight font-serif text-yellow-300 drop-shadow-md">
-                  ARRAIAL CONCILIA SYNC
-                </h1>
-                <span class="text-3xl animate-bounce">🌽</span>
-              </div>
-              <p class="text-xs md:text-sm text-orange-100 font-bold tracking-widest uppercase">
-                Sistema Inteligente de Caixa, Fichas e Entrega Física em Tempo Real
-              </p>
-            </div>
-          </div>
-
-          <!-- Connection & Sync Bar -->
-          <div class="bg-amber-100 border-b border-amber-200 py-1.5 px-4 text-xs">
-            <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-2 text-slate-600">
-              <div class="flex items-center gap-2 font-medium">
-                <span class="relative flex h-2.5 w-2.5">
-                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full ${state.isSyncing ? 'bg-amber-400' : 'bg-emerald-400'} opacity-75"></span>
-                  <span class="relative inline-flex rounded-full h-2.5 w-2.5 ${state.isSyncing ? 'bg-amber-500' : 'bg-emerald-500'}"></span>
-                </span>
-                <span>${state.isSyncing ? 'Conectando...' : 'Arraial Sincronizado com todos os celulares'}</span>
-              </div>
-              
-              <div class="flex items-center gap-2">
-                ${state.sellerName ? `
-                  <button 
-                    onclick="handleChangeRole()"
-                    class="flex items-center gap-1.5 bg-white/70 hover:bg-white px-2.5 py-1 rounded-full text-slate-700 font-bold shadow-xs transition text-[11px]"
-                  >
-                    <i data-lucide="users" class="w-3 h-3 text-orange-600"></i>
-                    <span>Operador: <strong class="text-orange-700">${state.sellerName}</strong></span>
-                    <span class="bg-orange-100 text-orange-800 text-[9px] px-1.5 py-0.25 rounded-md font-black uppercase">
-                      ${state.operatorRole === 'CAIXA' ? 'Caixa' : state.operatorRole === 'BARRACA' ? 'Barraca' : 'Gestão'}
-                    </span>
-                    <span class="text-[10px] text-blue-600 underline ml-0.5">(Trocar)</span>
-                  </button>
-                ` : `
-                  <button 
-                    onclick="handleChangeRole()"
-                    class="bg-orange-500 hover:bg-orange-600 text-white font-bold px-3 py-1 rounded-full text-[11px]"
-                  >
-                    Entrar como Colaborador
-                  </button>
-                `}
-              </div>
-            </div>
-          </div>
-
-          <!-- Floating Notifications -->
-          ${state.alertMessage ? `
-            <div class="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 w-11/12 max-w-sm shadow-2xl rounded-2xl overflow-hidden animate-bounce">
-              <div class="p-4 flex items-center justify-between text-white font-bold ${
-                state.alertMessage.type === 'success' ? 'bg-emerald-600' :
-                state.alertMessage.type === 'error' ? 'bg-red-600' :
-                state.alertMessage.type === 'warning' ? 'bg-amber-500' : 'bg-blue-600'
-              }">
-                <div class="flex items-center gap-2">
-                  <span class="text-xs md:text-sm">${state.alertMessage.text}</span>
-                </div>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- Confirmation Modal -->
-          ${state.confirmDeleteData ? `
-            <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-              <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border-2 border-red-500">
-                <h3 class="text-lg font-bold text-slate-900 flex items-center gap-2">
-                  ⚠️ Confirmar Remoção
-                </h3>
-                <p class="text-sm text-slate-600 mt-2">
-                  Tem certeza de que deseja remover o produto <strong>"${state.confirmDeleteData.name}"</strong>? Isto não apagará as baixas existentes, mas o item sumirá das barracas.
-                </p>
-                <div class="mt-4 flex gap-3 justify-end">
-                  <button
-                    onclick="closeDeleteModal()"
-                    class="px-4 py-2 text-sm font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl"
-                  >
-                    Voltar
-                  </button>
-                  <button
-                    onclick="executeDeleteItem()"
-                    class="px-4 py-2 text-sm font-bold bg-red-600 hover:bg-red-700 text-white rounded-xl"
-                  >
-                    Deletar do Cardápio
-                  </button>
-                </div>
-              </div>
-            </div>
-          ` : ''}
-
-          <!-- MAIN APP WINDOW -->
-          <main class="max-w-4xl mx-auto px-3 py-4">
-
-            <!-- User Identification Overlap -->
-            ${state.isSettingName ? `
-              <div class="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-40 flex items-center justify-center p-4">
-                <div class="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border-2 border-amber-500">
-                  <div class="text-center mb-4">
-                    <span class="text-4xl block mb-2">🤠</span>
-                    <h3 class="text-xl font-black text-slate-800">Selecione seu Perfil</h3>
-                    <p class="text-xs text-slate-500 mt-1">
-                      O caixa vende as fichas genéricas. As barracas recebem e dão baixa nos produtos físicos que entregam.
-                    </p>
-                  </div>
-                  <form onsubmit="handleSaveOperator(event)" class="space-y-4">
-                    <div>
-                      <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Seu Nome / Barraca</label>
-                      <input
-                        id="inputSellerName"
-                        type="text"
-                        placeholder="Ex: Ana Clara, Caixa Principal..."
-                        value="${state.tempSellerName}"
-                        class="w-full px-3 py-2.5 border-2 border-amber-200 rounded-xl focus:outline-none focus:border-orange-500 text-center text-base font-bold"
-                        maxlength="20"
-                        required
-                      />
-                    </div>
-
-                    <div>
-                      <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Sua Função</label>
-                      <div class="grid grid-cols-3 gap-1.5">
-                        <button
-                          type="button"
-                          onclick="selectTempRole('CAIXA')"
-                          class="p-2 rounded-xl text-center border-2 flex flex-col items-center justify-center gap-1 transition ${
-                            state.tempRole === 'CAIXA' 
-                              ? 'border-orange-500 bg-orange-50 text-orange-700 font-extrabold' 
-                              : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
-                          }"
-                        >
-                          <i data-lucide="dollar-sign" class="w-4 h-4"></i>
-                          <span class="text-[10px]">Vende Fichas</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onclick="selectTempRole('BARRACA')"
-                          class="p-2 rounded-xl text-center border-2 flex flex-col items-center justify-center gap-1 transition ${
-                            state.tempRole === 'BARRACA' 
-                              ? 'border-orange-500 bg-orange-50 text-orange-700 font-extrabold' 
-                              : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
-                          }"
-                        >
-                          <i data-lucide="truck" class="w-4 h-4"></i>
-                          <span class="text-[10px]">Entrega Item</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onclick="selectTempRole('ADMIN')"
-                          class="p-2 rounded-xl text-center border-2 flex flex-col items-center justify-center gap-1 transition ${
-                            state.tempRole === 'ADMIN' 
-                              ? 'border-orange-500 bg-orange-50 text-orange-700 font-extrabold' 
-                              : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
-                          }"
-                        >
-                          <i data-lucide="sliders" class="w-4 h-4"></i>
-                          <span class="text-[10px]">Gestão</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <button
-                      type="submit"
-                      class="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-bold py-3 px-4 rounded-xl shadow-md transition transform active:scale-95"
-                    >
-                      Confirmar Perfil 🎉
-                    </button>
-                  </form>
-                </div>
-              </div>
-            ` : ''}
-
-            <!-- Sync Indicators -->
-            <section class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-              <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-                <div class="p-2 bg-emerald-100 rounded-lg text-emerald-700 shrink-0">
-                  <i data-lucide="dollar-sign" class="w-4.5 h-4.5"></i>
-                </div>
-                <div>
-                  <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Total Arrecadado</p>
-                  <p class="text-sm md:text-base font-black text-slate-800">
-                    R$ ${revenueCaixa.toFixed(2)}
-                  </p>
-                </div>
-              </div>
-
-              <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-                <div class="p-2 bg-amber-100 rounded-lg text-amber-700 shrink-0">
-                  <i data-lucide="layers" class="w-4.5 h-4.5"></i>
-                </div>
-                <div>
-                  <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Fichas em Circulação</p>
-                  <p class="text-sm md:text-base font-black text-amber-600">
-                    ${fichasComunsEmCirculacao + fichasEspeciaisEmCirculacao} un
-                  </p>
-                </div>
-              </div>
-
-              <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-                <div class="p-2 rounded-lg shrink-0 ${lowStockItems.length > 0 ? 'bg-orange-100 text-orange-700 animate-pulse' : 'bg-slate-100 text-slate-400'}">
-                  <i data-lucide="alert-triangle" class="w-4.5 h-4.5"></i>
-                </div>
-                <div>
-                  <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Estoque Crítico</p>
-                  <p class="text-sm md:text-base font-black ${lowStockItems.length > 0 ? 'text-orange-600' : 'text-slate-700'}">
-                    ${lowStockItems.length} itens
-                  </p>
-                </div>
-              </div>
-
-              <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-                <div class="p-2 rounded-lg shrink-0 ${outOfStockItems.length > 0 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-400'}">
-                  <i data-lucide="package" class="w-4.5 h-4.5"></i>
-                </div>
-                <div>
-                  <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Esgotados</p>
-                  <p class="text-sm md:text-base font-black ${outOfStockItems.length > 0 ? 'text-red-600' : 'text-slate-700'}">
-                    ${outOfStockItems.length} itens
-                  </p>
-                </div>
-              </div>
-            </section>
-
-            ${lowStockItems.length > 0 ? `
-              <div class="bg-amber-100 border-l-4 border-amber-500 text-amber-900 p-3 rounded-r-xl mb-4 text-xs flex justify-between items-center animate-pulse">
-                <div class="flex items-center gap-2">
-                  <i data-lucide="alert-triangle" class="text-amber-600 shrink-0 w-4 h-4"></i>
-                  <span>
-                    <strong>Aviso:</strong> O estoque de ${lowStockItems.map(i => `"${i.name}"`).join(', ')} está muito baixo! Reponha imediatamente.
+            <div class="flex items-center gap-2">
+              ${state.sellerName ? `
+                <button 
+                  onclick="handleChangeRole()"
+                  class="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-full text-slate-700 font-bold shadow-xs transition text-[11px]"
+                >
+                  <i data-lucide="users" class="w-3 h-3 text-orange-600"></i>
+                  <span>Colaborador: <strong class="text-orange-700">${state.sellerName}</strong></span>
+                  <span class="bg-orange-100 text-orange-800 text-[9px] px-1.5 py-0.25 rounded-md font-black uppercase">
+                    ${state.operatorRole === 'CAIXA' ? 'Caixa' : state.operatorRole === 'BARRACA' ? 'Barraca' : 'Gestão'}
                   </span>
-                </div>
+                  <span class="text-[10px] text-blue-600 underline ml-0.5">(Trocar)</span>
+                </button>
+              ` : `
+                <button 
+                  onclick="handleChangeRole()"
+                  class="bg-orange-500 hover:bg-orange-600 text-white font-bold px-3 py-1 rounded-full text-[11px]"
+                >
+                  Entrar como Colaborador
+                </button>
+              `}
+            </div>
+          </div>
+        </div>
+
+        ${state.alertMessage ? `
+          <div class="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 w-11/12 max-w-sm shadow-2xl rounded-2xl overflow-hidden animate-bounce">
+            <div class="p-4 flex items-center justify-between text-white font-bold ${
+              state.alertMessage.type === 'success' ? 'bg-emerald-600' :
+              state.alertMessage.type === 'error' ? 'bg-red-600' :
+              state.alertMessage.type === 'warning' ? 'bg-amber-500' : 'bg-blue-600'
+            }">
+              <div class="flex items-center gap-2">
+                <span class="text-xs md:text-sm">${state.alertMessage.text}</span>
               </div>
-            ` : ''}
+            </div>
+          </div>
+        ` : ''}
 
-            <!-- Tabs Navigation -->
-            <nav class="flex bg-white p-1 rounded-xl border border-amber-200 mb-4 shadow-xs gap-1">
-              ${state.operatorRole === 'CAIXA' ? `
-                <button
-                  onclick="setActiveTab('vender_fichas')"
-                  class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
-                    state.activeTab === 'vender_fichas' 
-                      ? 'bg-orange-500 text-white shadow-xs' 
-                      : 'text-slate-600 hover:bg-amber-50'
-                  }"
-                >
-                  <i data-lucide="credit-card" class="w-3.5 h-3.5"></i>
-                  <span>Vender Fichas</span>
-                </button>
-              ` : ''}
-
-              ${state.operatorRole === 'BARRACA' ? `
-                <button
-                  onclick="setActiveTab('entregar_produtos')"
-                  class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
-                    state.activeTab === 'entregar_produtos' 
-                      ? 'bg-orange-500 text-white shadow-xs' 
-                      : 'text-slate-600 hover:bg-amber-50'
-                  }"
-                >
-                  <i data-lucide="truck" class="w-3.5 h-3.5"></i>
-                  <span>Entregar Itens</span>
-                </button>
-              ` : ''}
-
-              ${state.operatorRole === 'ADMIN' ? `
-                <button
-                  onclick="setActiveTab('painel')"
-                  class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
-                    state.activeTab === 'painel' 
-                      ? 'bg-orange-500 text-white shadow-xs' 
-                      : 'text-slate-600 hover:bg-amber-50'
-                  }"
-                >
-                  <i data-lucide="trending-up" class="w-3.5 h-3.5"></i>
-                  <span>Conciliação Geral</span>
-                </button>
-                
-                <button
-                  onclick="setActiveTab('gerenciar')"
-                  class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
-                    state.activeTab === 'gerenciar' 
-                      ? 'bg-orange-500 text-white shadow-xs' 
-                      : 'text-slate-600 hover:bg-amber-50'
-                  }"
-                >
-                  <i data-lucide="settings" class="w-3.5 h-3.5"></i>
-                  <span>Gerenciar Produtos</span>
-                </button>
-              ` : ''}
-
-              <button
-                onclick="setActiveTab('historico_geral')"
-                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
-                  state.activeTab === 'historico_geral' 
-                    ? 'bg-orange-500 text-white shadow-xs' 
-                    : 'text-slate-600 hover:bg-amber-50'
-                }"
-              >
-                <i data-lucide="history" class="w-3.5 h-3.5"></i>
-                <span>Atividades</span>
-              </button>
-            </nav>
-
-            <!-- TAB CONTENT: Vender Fichas -->
-            ${state.activeTab === 'vender_fichas' ? `
-              <div class="space-y-4">
-                <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                  <div class="text-center mb-4 border-b border-amber-100 pb-3">
-                    <span class="text-xs bg-emerald-100 text-emerald-800 font-extrabold px-3 py-1 rounded-full uppercase">
-                      Terminal de Vendas Ativo 💰
-                    </span>
-                    <h3 class="text-lg font-black text-slate-800 mt-2">Venda de Fichas Genéricas</h3>
-                    <p class="text-xs text-slate-500">
-                      Os clientes compram as fichas aqui e escolhem o produto na barraca correspondente.
-                    </p>
-                  </div>
-
-                  <!-- Payment Method Selector -->
-                  <div class="mb-5 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                    <label class="block text-xs font-black text-slate-500 uppercase text-center mb-2">Forma de Pagamento:</label>
-                    <div class="grid grid-cols-3 gap-2">
-                      ${['Dinheiro', 'PIX', 'Cartão'].map(method => `
-                        <button
-                          type="button"
-                          onclick="setPaymentMethod('${method}')"
-                          class="py-2 px-3 rounded-lg font-bold text-xs border-2 text-center transition ${
-                            state.paymentMethod === method 
-                              ? 'border-emerald-500 bg-emerald-50 text-emerald-800 font-black' 
-                              : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
-                          }"
-                        >
-                          ${method === 'Dinheiro' ? '💵' : method === 'PIX' ? '⚡' : '💳'} ${method}
-                        </button>
-                      `).join('')}
-                    </div>
-                  </div>
-
-                  <!-- Quick Sell Cards -->
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    
-                    <!-- Token R$ 5,00 Card -->
-                    <div class="bg-amber-50/50 rounded-2xl p-4 border border-amber-200 flex flex-col justify-between">
-                      <div class="text-center">
-                        <span class="bg-amber-100 text-amber-800 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase">
-                          Ficha Padrão
-                        </span>
-                        <h4 class="text-xl font-black text-slate-800 mt-1">Ficha Comum</h4>
-                        <p class="text-2xl font-black text-orange-600 my-2">R$ 5,00</p>
-                        <p class="text-[10px] text-slate-500">Milho, Canjica, Pipoca, Salsichão, Pastel, Doces e Refrigerantes.</p>
-                      </div>
-
-                      <div class="mt-4 space-y-2">
-                        <div class="flex gap-1">
-                          ${[1, 2, 3, 5, 10].map(n => `
-                            <button
-                              onclick="handleSellTokens('Comum', ${n})"
-                              class="flex-1 bg-white hover:bg-amber-100 text-slate-800 border border-amber-300 py-2.5 rounded-lg text-xs font-black active:scale-95 transition"
-                            >
-                              +${n}
-                            </button>
-                          `).join('')}
-                        </div>
-                      </div>
-                    </div>
-
-                    <!-- Token R$ 7,50 Card -->
-                    <div class="bg-red-50/40 rounded-2xl p-4 border border-red-200 flex flex-col justify-between">
-                      <div class="text-center">
-                        <span class="bg-red-100 text-red-800 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase">
-                          Ficha Premium
-                        </span>
-                        <h4 class="text-xl font-black text-slate-800 mt-1">Ficha Especial</h4>
-                        <p class="text-2xl font-black text-red-600 my-2">R$ 7,50</p>
-                        <p class="text-[10px] text-slate-500">Especialmente recomendada para bebidas destiladas ou itens premium.</p>
-                      </div>
-
-                      <div class="mt-4 space-y-2">
-                        <div class="flex gap-1">
-                          ${[1, 2, 3, 5, 10].map(n => `
-                            <button
-                              onclick="handleSellTokens('Especial', ${n})"
-                              class="flex-1 bg-white hover:bg-red-100 text-slate-800 border border-red-300 py-2.5 rounded-lg text-xs font-black active:scale-95 transition"
-                            >
-                              +${n}
-                            </button>
-                          `).join('')}
-                        </div>
-                      </div>
-                    </div>
-
-                  </div>
-                </div>
-
-                <!-- Private Sales Report -->
-                <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                  <h4 class="text-sm font-black text-slate-800 mb-2">Relatório Consolidado de Vendas do Caixa</h4>
-                  <div class="grid grid-cols-3 gap-2 text-center text-xs">
-                    <div class="bg-slate-50 p-2 rounded-lg">
-                      <p class="text-slate-400 font-bold">💵 Dinheiro</p>
-                      <p class="text-base font-black text-slate-800">R$ ${totalPaymentDinheiro.toFixed(2)}</p>
-                    </div>
-                    <div class="bg-slate-50 p-2 rounded-lg">
-                      <p class="text-slate-400 font-bold">⚡ PIX</p>
-                      <p class="text-base font-black text-slate-800">R$ ${totalPaymentPIX.toFixed(2)}</p>
-                    </div>
-                    <div class="bg-slate-50 p-2 rounded-lg">
-                      <p class="text-slate-400 font-bold">💳 Cartão</p>
-                      <p class="text-base font-black text-slate-800">R$ ${totalPaymentCartao.toFixed(2)}</p>
-                    </div>
-                  </div>
-                </div>
+        <!-- Confirmação de exclusão de produto -->
+        ${state.confirmDeleteData ? `
+          <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+            <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border-2 border-red-500">
+              <h3 class="text-lg font-bold text-slate-900">⚠️ Confirmar Remoção</h3>
+              <p class="text-sm text-slate-600 mt-2">
+                Tem certeza de que deseja remover o produto <strong>"${state.confirmDeleteData.name}"</strong>? Ele sumirá das opções de baixa das barracas.
+              </p>
+              <div class="mt-4 flex gap-3 justify-end">
+                <button onclick="closeDeleteModal()" class="px-4 py-2 text-sm font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl">Voltar</button>
+                <button onclick="executeDeleteItem()" class="px-4 py-2 text-sm font-bold bg-red-600 hover:bg-red-700 text-white rounded-xl">Deletar do Cardápio</button>
               </div>
-            ` : ''}
+            </div>
+          </div>
+        ` : ''}
 
-            <!-- TAB CONTENT: Entregar Produtos (Barraca) -->
-            ${state.activeTab === 'entregar_produtos' ? `
-              <div>
-                ${state.items.length === 0 ? `
-                  <div class="bg-white rounded-2xl border-2 border-dashed border-amber-300 p-8 text-center my-6">
-                    <span class="text-5xl block mb-2">🍿</span>
-                    <p class="font-bold text-slate-700 text-lg">Nenhum produto cadastrado!</p>
-                    <p class="text-sm text-slate-500 max-w-xs mx-auto mt-1 mb-4">
-                      Peça ao administrador para cadastrar os produtos nas configurações primeiro.
-                    </p>
-                  </div>
-                ` : `
-                  <div class="space-y-3">
-                    <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs text-xs">
-                      👋 <strong>Olá, ${state.sellerName}!</strong> Recolha a ficha física do cliente e dê baixa no produto que está entregando:
-                    </div>
+        <main class="max-w-4xl mx-auto px-3 py-4">
 
-                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      ${state.items.map((item) => {
-                        const isOutOfStock = item.stock <= 0;
-                        const isLowStock = item.stock > 0 && item.stock <= 5;
-                        const tokenType = parseFloat(item.price) === 7.50 ? 'Especial (R$ 7,50)' : 'Comum (R$ 5,00)';
-                        const badgeColor = parseFloat(item.price) === 7.50 ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
-
-                        return `
-                          <div class="bg-white rounded-2xl border p-4 shadow-xs flex flex-col justify-between relative ${
-                            isOutOfStock 
-                              ? 'border-red-300 bg-red-50/30 opacity-75' 
-                              : isLowStock 
-                                ? 'border-orange-300 bg-orange-50/10' 
-                                : 'border-amber-200'
-                          }">
-                            <div class="flex justify-between items-start mb-2">
-                              <div>
-                                <span class="text-[9px] font-extrabold px-2 py-0.5 rounded-md uppercase ${badgeColor}">
-                                  Exige Ficha ${tokenType}
-                                </span>
-                                <h3 class="text-base md:text-lg font-black text-slate-800 mt-1">
-                                  ${item.name}
-                                </h3>
-                              </div>
-                              <span class="text-sm font-black text-orange-600">R$ ${parseFloat(item.price).toFixed(2)}</span>
-                            </div>
-
-                            <div class="my-3 flex items-center justify-between bg-slate-50 p-2 rounded-xl border border-slate-100 text-xs">
-                              <span class="text-slate-500 font-bold">Estoque Físico na Barraca:</span>
-                              <span class="text-sm font-black px-2.5 py-0.5 rounded-full ${
-                                isOutOfStock 
-                                  ? 'bg-red-100 text-red-700' 
-                                  : isLowStock 
-                                    ? 'bg-orange-100 text-orange-700' 
-                                    : 'bg-emerald-100 text-emerald-800'
-                              }">
-                                ${isOutOfStock ? 'Esgotado! ❌' : `${item.stock} un`}
-                              </span>
-                            </div>
-
-                            <div class="mt-2 pt-2 border-t border-slate-100 flex gap-2">
-                              <button
-                                onclick="handleDeliverProduct('${item.id}', 5)"
-                                ${isOutOfStock || item.stock < 5 ? 'disabled' : ''}
-                                class="px-3 py-3 rounded-xl font-bold text-xs transition border flex items-center justify-center ${
-                                  isOutOfStock || item.stock < 5
-                                    ? 'bg-slate-100 text-slate-300 border-slate-200 cursor-not-allowed'
-                                    : 'bg-amber-50 hover:bg-amber-100 text-amber-700 border-amber-200 active:scale-95'
-                                }"
-                              >
-                                -5 un
-                              </button>
-
-                              <button
-                                onclick="handleDeliverProduct('${item.id}', 1)"
-                                ${isOutOfStock ? 'disabled' : ''}
-                                class="flex-1 py-3 px-4 rounded-xl font-black text-sm shadow-xs transition transform active:scale-95 flex items-center justify-center gap-1.5 ${
-                                  isOutOfStock
-                                    ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
-                                    : 'bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white'
-                                }"
-                              >
-                                <i data-lucide="minus" class="w-4 h-4"></i>
-                                <span>Entregar Item (Baixa -1)</span>
-                              </button>
-                            </div>
-                          </div>
-                        `;
-                      }).join('')}
-                    </div>
-                  </div>
-                `}
-              </div>
-            ` : ''}
-
-            <!-- TAB CONTENT: Conciliação Geral -->
-            ${state.activeTab === 'painel' ? `
-              <div class="space-y-4">
-                <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                  <h3 class="font-extrabold text-slate-800 text-base mb-1">Auditoria de Caixa vs. Entregas Reais</h3>
-                  <p class="text-xs text-slate-500">
-                    Balanço geral em tempo real de fichas em circulação nas mãos dos clientes.
+          ${state.isSettingName ? `
+            <div class="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-40 flex items-center justify-center p-4">
+              <div class="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border-2 border-amber-500">
+                <div class="text-center mb-4">
+                  <span class="text-4xl block mb-2">🤠</span>
+                  <h3 class="text-xl font-black text-slate-800">Selecione seu Perfil</h3>
+                  <p class="text-xs text-slate-500 mt-1">
+                    Os caixas vendem as fichas físicas de R$ 5,00 ou R$ 7,50. Cada barraca recebe as fichas correspondentes e dá a baixa do produto entregue!
                   </p>
-
-                  <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 pt-3 border-t border-slate-100">
-                    <div class="bg-amber-50/40 p-4 rounded-xl border border-amber-200">
-                      <h4 class="font-extrabold text-slate-800 text-sm mb-3">Fichas de R$ 5,00 (Comum)</h4>
-                      <div class="space-y-2 text-xs">
-                        <div class="flex justify-between">
-                          <span class="text-slate-500">Fichas Vendidas no Caixa:</span>
-                          <span class="font-bold text-slate-800">${totalFichasComunsVendidas} un</span>
-                        </div>
-                        <div class="flex justify-between">
-                          <span class="text-slate-500">Entregues nas Barracas:</span>
-                          <span class="font-bold text-emerald-600">${totalFichasComunsEntregues} un</span>
-                        </div>
-                        <div class="flex justify-between pt-2 border-t border-dashed border-amber-200 font-extrabold">
-                          <span class="text-slate-700">Fichas em Circulação:</span>
-                          <span class="text-orange-600">${fichasComunsEmCirculacao} un</span>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="bg-red-50/30 p-4 rounded-xl border border-red-200">
-                      <h4 class="font-extrabold text-slate-800 text-sm mb-3">Fichas de R$ 7,50 (Especial)</h4>
-                      <div class="space-y-2 text-xs">
-                        <div class="flex justify-between">
-                          <span class="text-slate-500">Fichas Vendidas no Caixa:</span>
-                          <span class="font-bold text-slate-800">${totalFichasEspeciaisVendidas} un</span>
-                        </div>
-                        <div class="flex justify-between">
-                          <span class="text-slate-500">Entregues nas Barracas:</span>
-                          <span class="font-bold text-emerald-600">${totalFichasEspeciaisEntregues} un</span>
-                        </div>
-                        <div class="flex justify-between pt-2 border-t border-dashed border-red-200 font-extrabold">
-                          <span class="text-slate-700">Fichas em Circulação:</span>
-                          <span class="text-orange-600">${fichasEspeciaisEmCirculacao} un</span>
-                        </div>
-                      </div>
-                    </div>
+                </div>
+                <form onsubmit="handleSaveOperator(event)" class="space-y-4">
+                  <div>
+                    <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Seu Nome / Identificação</label>
+                    <input
+                      id="inputSellerName"
+                      type="text"
+                      placeholder="Ex: Pedro Caixa, Barraca Pipoca..."
+                      value="${state.tempSellerName}"
+                      class="w-full px-3 py-2.5 border-2 border-amber-200 rounded-xl focus:outline-none focus:border-orange-500 text-center text-base font-bold"
+                      maxlength="20"
+                      required
+                    />
                   </div>
-                </div>
 
-                <!-- Inventário Físico Consolidado -->
-                <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                  <h3 class="font-extrabold text-slate-800 text-sm mb-3">Inventário Físico Atual do Evento</h3>
-                  ${state.items.length === 0 ? `
-                    <p class="text-xs text-slate-400 text-center py-6">Nenhum produto cadastrado para auditar.</p>
-                  ` : `
-                    <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                      ${state.items.map(i => `
-                        <div class="bg-slate-50 p-2.5 rounded-lg border border-slate-150 text-xs">
-                          <p class="font-black text-slate-800 truncate">${i.name}</p>
-                          <div class="flex justify-between items-center mt-1">
-                            <span class="text-[10px] text-slate-400">Estoque:</span>
-                            <span class="font-black px-2 py-0.5 rounded ${
-                              i.stock === 0 ? 'bg-red-100 text-red-700' : i.stock <= 5 ? 'bg-orange-100 text-orange-700' : 'bg-emerald-100 text-emerald-800'
-                            }">
-                              ${i.stock} un
-                            </span>
-                          </div>
-                        </div>
-                      `).join('')}
-                    </div>
-                  `}
-                </div>
-              </div>
-            ` : ''}
-
-            <!-- TAB CONTENT: Gerenciar Cardápio -->
-            ${state.activeTab === 'gerenciar' ? `
-              <div class="space-y-4">
-                <!-- Cadastrar Produto -->
-                <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                  <h3 class="font-extrabold text-slate-800 text-base mb-3 flex items-center gap-1.5">
-                    Cadastrar Novo Produto
-                  </h3>
-                  
-                  <form onsubmit="handleAddNewItem(event)" class="grid grid-cols-1 md:grid-cols-4 gap-3">
-                    <div class="col-span-1 md:col-span-2">
-                      <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Nome do Produto</label>
-                      <input
-                        id="newItemName"
-                        type="text"
-                        placeholder="Ex: Milho Cozido, Espetinho Carne..."
-                        class="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-orange-500 text-sm font-semibold"
-                        required
-                      />
-                    </div>
-
-                    <div>
-                      <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Exige qual Ficha?</label>
-                      <select
-                        id="newItemPrice"
-                        class="w-full px-3 py-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:border-orange-500 text-sm font-semibold"
-                      >
-                        <option value="5.00">R$ 5,00 (Ficha Comum)</option>
-                        <option value="7.50">R$ 7,50 (Ficha Especial)</option>
-                      </select>
-                    </div>
-
-                    <div>
-                      <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Estoque Físico</label>
-                      <input
-                        id="newItemStock"
-                        type="number"
-                        placeholder="Quantidade"
-                        class="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-orange-500 text-sm font-semibold"
-                        required
-                      />
-                    </div>
-
-                    <div class="col-span-1 md:col-span-2">
-                      <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Categoria</label>
-                      <select
-                        id="newItemCategory"
-                        class="w-full px-3 py-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:border-orange-500 text-sm font-semibold"
-                      >
-                        <option value="Comida">🌽 Comida</option>
-                        <option value="Bebida">🍹 Bebida</option>
-                        <option value="Brincadeira">🎯 Brincadeira</option>
-                        <option value="Outros">🎁 Outros</option>
-                      </select>
-                    </div>
-
-                    <div class="col-span-1 md:col-span-4 pt-1">
+                  <div>
+                    <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Sua Função</label>
+                    <div class="grid grid-cols-3 gap-1.5">
                       <button
-                        type="submit"
-                        class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2.5 px-4 rounded-xl shadow transition"
+                        type="button"
+                        onclick="selectTempRole('CAIXA')"
+                        class="p-2 rounded-xl text-center border-2 flex flex-col items-center justify-center gap-1 transition ${
+                          state.tempRole === 'CAIXA' 
+                            ? 'border-orange-500 bg-orange-50 text-orange-700 font-extrabold' 
+                            : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                        }"
                       >
-                        Salvar Produto no Cardápio Sincronizado ✔️
+                        <i data-lucide="dollar-sign" class="w-4 h-4"></i>
+                        <span class="text-[10px]">Vende Fichas</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onclick="selectTempRole('BARRACA')"
+                        class="p-2 rounded-xl text-center border-2 flex flex-col items-center justify-center gap-1 transition ${
+                          state.tempRole === 'BARRACA' 
+                            ? 'border-orange-500 bg-orange-50 text-orange-700 font-extrabold' 
+                            : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                        }"
+                      >
+                        <i data-lucide="truck" class="w-4 h-4"></i>
+                        <span class="text-[10px]">Entrega Item</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onclick="selectTempRole('ADMIN')"
+                        class="p-2 rounded-xl text-center border-2 flex flex-col items-center justify-center gap-1 transition ${
+                          state.tempRole === 'ADMIN' 
+                            ? 'border-orange-500 bg-orange-50 text-orange-700 font-extrabold' 
+                            : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
+                        }"
+                      >
+                        <i data-lucide="sliders" class="w-4 h-4"></i>
+                        <span class="text-[10px]">Gestão</span>
                       </button>
                     </div>
-                  </form>
-                </div>
+                  </div>
 
-                <!-- Lista de Produtos para edição de estoque rápida -->
-                <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                  <h3 class="font-extrabold text-slate-800 text-base mb-2">Ajustar Estoque ou Excluir Itens</h3>
-                  ${state.items.length === 0 ? `
-                    <p class="text-center py-6 text-slate-400 text-xs">Nenhum produto cadastrado.</p>
-                  ` : `
-                    <div class="overflow-x-auto">
-                      <table class="w-full text-left text-xs md:text-sm">
-                        <thead>
-                          <tr class="border-b border-slate-100 text-slate-400 uppercase text-[9px] tracking-wider font-bold">
-                            <th class="py-2">Item</th>
-                            <th class="py-2 text-right">Valor</th>
-                            <th class="py-2 text-center w-36">Estoque Físico</th>
-                            <th class="py-2 text-center w-12">Remover</th>
-                          </tr>
-                        </thead>
-                        <tbody class="divide-y divide-slate-100">
-                          ${state.items.map((item) => `
-                            <tr class="hover:bg-slate-50">
-                              <td class="py-3">
-                                <span class="font-black text-slate-800 block">${item.name}</span>
-                                <span class="text-[9px] text-slate-500 bg-slate-100 px-1.5 py-0.25 rounded uppercase">
-                                  ${item.category}
-                                </span>
-                              </td>
-                              <td class="py-3 text-right font-extrabold text-slate-700">
-                                R$ ${parseFloat(item.price).toFixed(2)}
-                              </td>
-                              <td class="py-3">
-                                <div class="flex items-center justify-center gap-1.5">
-                                  <button
-                                    type="button"
-                                    onclick="handleUpdateStockDirectly('${item.id}', ${Math.max(0, item.stock - 1)}, '${item.name}')"
-                                    class="h-7 w-7 bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 active:scale-95 flex items-center justify-center font-bold"
-                                  >
-                                    -
-                                  </button>
-                                  <input
-                                    type="number"
-                                    value="${item.stock}"
-                                    onchange="handleUpdateStockDirectly('${item.id}', this.value, '${item.name}')"
-                                    class="w-14 text-center border border-slate-200 rounded-md py-1 px-1 font-extrabold text-slate-800"
-                                  />
-                                  <button
-                                    type="button"
-                                    onclick="handleUpdateStockDirectly('${item.id}', ${item.stock + 1}, '${item.name}')"
-                                    class="h-7 w-7 bg-slate-100 text-slate-600 rounded-lg hover:bg-slate-200 active:scale-95 flex items-center justify-center font-bold"
-                                  >
-                                    +
-                                  </button>
-                                </div>
-                              </td>
-                              <td class="py-3 text-center">
-                                <button
-                                  type="button"
-                                  onclick="handleDeleteItem('${item.id}', '${item.name}')"
-                                  class="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-slate-50 transition"
-                                >
-                                  Excluir
-                                </button>
-                              </td>
-                            </tr>
-                          `).join('')}
-                        </tbody>
-                      </table>
-                    </div>
-                  `}
-                </div>
+                  <button
+                    type="submit"
+                    class="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-bold py-3 px-4 rounded-xl shadow-md transition transform active:scale-95"
+                  >
+                    Confirmar Perfil 🎉
+                  </button>
+                </form>
               </div>
+            </div>
+          ` : ''}
+
+          <!-- Quadro de Indicadores Rápidos -->
+          <section class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
+            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
+              <div class="p-2 bg-emerald-100 rounded-lg text-emerald-700 shrink-0">
+                <i data-lucide="dollar-sign" class="w-4.5 h-4.5"></i>
+              </div>
+              <div>
+                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Total Vendas</p>
+                <p class="text-sm md:text-base font-black text-slate-800">R$ ${revenueCaixa.toFixed(2)}</p>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
+              <div class="p-2 bg-amber-100 rounded-lg text-amber-700 shrink-0">
+                <i data-lucide="layers" class="w-4.5 h-4.5"></i>
+              </div>
+              <div>
+                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Fichas com Clientes</p>
+                <p class="text-sm md:text-base font-black text-amber-600">${fichasComunsEmCirculacao + fichasEspeciaisEmCirculacao} un</p>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
+              <div class="p-2 rounded-lg shrink-0 ${lowStockItems.length > 0 ? 'bg-orange-100 text-orange-700 animate-pulse' : 'bg-slate-100 text-slate-400'}">
+                <i data-lucide="alert-triangle" class="w-4.5 h-4.5"></i>
+              </div>
+              <div>
+                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Estoque Baixo</p>
+                <p class="text-sm md:text-base font-black ${lowStockItems.length > 0 ? 'text-orange-600' : 'text-slate-700'}">${lowStockItems.length} itens</p>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
+              <div class="p-2 rounded-lg shrink-0 ${outOfStockItems.length > 0 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-400'}">
+                <i data-lucide="package" class="w-4.5 h-4.5"></i>
+              </div>
+              <div>
+                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Esgotados</p>
+                <p class="text-sm md:text-base font-black ${outOfStockItems.length > 0 ? 'text-red-600' : 'text-slate-700'}">${outOfStockItems.length} itens</p>
+              </div>
+            </div>
+          </section>
+
+          <!-- Abas de Navegação -->
+          <nav class="flex bg-white p-1 rounded-xl border border-amber-200 mb-4 shadow-xs gap-1">
+            ${state.operatorRole === 'CAIXA' ? `
+              <button
+                onclick="setActiveTab('vender_fichas')"
+                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                  state.activeTab === 'vender_fichas' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
+                }"
+              >
+                <i data-lucide="credit-card" class="w-3.5 h-3.5"></i>
+                <span>Vender Fichas</span>
+              </button>
             ` : ''}
 
-            <!-- TAB CONTENT: Histórico / Atividades Gerais -->
-            ${state.activeTab === 'historico_geral' ? `
+            ${state.operatorRole === 'BARRACA' ? `
+              <button
+                onclick="setActiveTab('entregar_produtos')"
+                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                  state.activeTab === 'entregar_produtos' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
+                }"
+              >
+                <i data-lucide="truck" class="w-3.5 h-3.5"></i>
+                <span>Entregar Itens (Baixas)</span>
+              </button>
+            ` : ''}
+
+            ${state.operatorRole === 'ADMIN' ? `
+              <button
+                onclick="setActiveTab('painel')"
+                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                  state.activeTab === 'painel' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
+                }"
+              >
+                <i data-lucide="trending-up" class="w-3.5 h-3.5"></i>
+                <span>Conciliação Geral</span>
+              </button>
+              
+              <button
+                onclick="setActiveTab('gerenciar')"
+                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                  state.activeTab === 'gerenciar' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
+                }"
+              >
+                <i data-lucide="settings" class="w-3.5 h-3.5"></i>
+                <span>Gerenciar Produtos</span>
+              </button>
+            ` : ''}
+
+            <button
+              onclick="setActiveTab('historico_geral')"
+              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                state.activeTab === 'historico_geral' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
+              }"
+            >
+              <i data-lucide="history" class="w-3.5 h-3.5"></i>
+              <span>Atividades</span>
+            </button>
+          </nav>
+
+          ${state.activeTab === 'vender_fichas' ? `
+            <div class="space-y-4">
               <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                <h3 class="font-extrabold text-slate-800 text-base mb-1">Linha do Tempo das Atividades</h3>
-                <p class="text-xs text-slate-500 mb-4">
-                  Histórico em tempo real de vendas e baixas processadas em todos os celulares conectados.
-                </p>
+                <div class="text-center mb-4 border-b border-amber-100 pb-3">
+                  <span class="text-xs bg-emerald-100 text-emerald-800 font-extrabold px-3 py-1 rounded-full uppercase">
+                    Terminal de Vendas Ativo 💰
+                  </span>
+                  <h3 class="text-lg font-black text-slate-800 mt-2">Venda de Fichas do Caixa</h3>
+                  <p class="text-xs text-slate-500">As fichas são unificadas para dar flexibilidade ao cliente de escolher o produto na barraca!</p>
+                </div>
 
-                ${state.transactions.length === 0 ? `
-                  <div class="text-center py-12 text-slate-400">
-                    <p class="text-4xl mb-2">⏳</p>
-                    <p class="font-bold">Nenhuma atividade registrada.</p>
+                <!-- Forma de Pagamento -->
+                <div class="mb-5 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                  <label class="block text-xs font-black text-slate-500 uppercase text-center mb-2">Forma de Pagamento:</label>
+                  <div class="grid grid-cols-3 gap-2">
+                    ${['Dinheiro', 'PIX', 'Cartão'].map(method => `
+                      <button
+                        type="button"
+                        onclick="setPaymentMethod('${method}')"
+                        class="py-2 px-3 rounded-lg font-bold text-xs border-2 text-center transition ${
+                          state.paymentMethod === method 
+                            ? 'border-emerald-500 bg-emerald-50 text-emerald-800 font-black' 
+                            : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
+                        }"
+                      >
+                        ${method === 'Dinheiro' ? '💵' : method === 'PIX' ? '⚡' : '💳'} ${method}
+                      </button>
+                    `).join('')}
                   </div>
-                ` : `
-                  <div class="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto pr-1">
-                    ${state.transactions.slice(0, 50).map((trans) => {
-                      const isSale = trans.type === 'VENDA_FICHA';
-                      const timeString = trans.timestamp?.seconds 
-                        ? new Date(trans.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})
-                        : 'Sincronizando...';
+                </div>
 
-                      return `
-                        <div class="py-3 flex items-center justify-between text-xs md:text-sm hover:bg-slate-50 px-2 rounded-lg transition">
-                          <div class="flex items-start gap-2.5">
-                            <span class="text-xl">${isSale ? '🎟️' : '🍿'}</span>
-                            <div>
-                              <p class="font-extrabold text-slate-800">
-                                ${isSale 
-                                  ? `Venda: ${trans.qty}x Ficha ${trans.tokenType}` 
-                                  : `Entrega: ${trans.qty}x ${trans.itemName}`
-                                }
-                              </p>
-                              <p class="text-[10px] text-slate-500 flex items-center gap-1.5 mt-0.5 flex-wrap">
-                                <span class="bg-slate-100 text-slate-700 px-1.5 py-0.25 rounded">
-                                  👤 ${trans.sellerName || 'Colaborador'}
-                                </span>
-                                ${isSale ? `
-                                  <span class="bg-emerald-50 text-emerald-700 px-1 py-0.25 rounded font-bold uppercase">
-                                    ${trans.paymentMethod || 'Dinheiro'}
-                                  </span>
-                                ` : `
-                                  <span class="bg-amber-50 text-amber-700 px-1 py-0.25 rounded font-bold uppercase">
-                                    Ficha ${trans.tokenTypeUsed}
-                                  </span>
-                                `}
-                                <span>•</span>
-                                <span>${timeString}</span>
-                              </p>
+                <!-- Botões Rápidos de Venda -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <!-- Ficha de R$ 5,00 -->
+                  <div class="bg-amber-50/50 rounded-2xl p-4 border border-amber-200 flex flex-col justify-between">
+                    <div class="text-center">
+                      <span class="bg-amber-100 text-amber-800 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase">Valor Padrão</span>
+                      <h4 class="text-xl font-black text-slate-800 mt-1">Ficha Comum</h4>
+                      <p class="text-2xl font-black text-orange-600 my-2">R$ 5,00</p>
+                      <p class="text-[10px] text-slate-500">Troque por: Salsichão, Pastel, Canjica, Pipoca ou Refrigerante.</p>
+                    </div>
+                    <div class="mt-4 flex gap-1">
+                      ${[1, 2, 3, 5, 10].map(n => `
+                        <button onclick="handleSellTokens('Comum', ${n})" class="flex-1 bg-white hover:bg-amber-100 text-slate-800 border border-amber-300 py-2 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
+                      `).join('')}
+                    </div>
+                  </div>
+
+                  <!-- Ficha de R$ 7,50 -->
+                  <div class="bg-red-50/40 rounded-2xl p-4 border border-red-200 flex flex-col justify-between">
+                    <div class="text-center">
+                      <span class="bg-red-100 text-red-800 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase">Valor Especial</span>
+                      <h4 class="text-xl font-black text-slate-800 mt-1">Ficha Especial</h4>
+                      <p class="text-2xl font-black text-red-600 my-2">R$ 7,50</p>
+                      <p class="text-[10px] text-slate-500">Troque por: Água com Gás ou outros itens especiais.</p>
+                    </div>
+                    <div class="mt-4 flex gap-1">
+                      ${[1, 2, 3, 5, 10].map(n => `
+                        <button onclick="handleSellTokens('Especial', ${n})" class="flex-1 bg-white hover:bg-red-100 text-slate-800 border border-red-300 py-2 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
+                      `).join('')}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Relatório Caixa -->
+              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
+                <h4 class="text-sm font-black text-slate-800 mb-2">Resumo Financeiro do Caixa</h4>
+                <div class="grid grid-cols-3 gap-2 text-center text-xs">
+                  <div class="bg-slate-50 p-2 rounded-lg"><p class="text-slate-400 font-bold">💵 Dinheiro</p><p class="text-base font-black text-slate-800">R$ ${totalPaymentDinheiro.toFixed(2)}</p></div>
+                  <div class="bg-slate-50 p-2 rounded-lg"><p class="text-slate-400 font-bold">⚡ PIX</p><p class="text-base font-black text-slate-800">R$ ${totalPaymentPIX.toFixed(2)}</p></div>
+                  <div class="bg-slate-50 p-2 rounded-lg"><p class="text-slate-400 font-bold">💳 Cartão</p><p class="text-base font-black text-slate-800">R$ ${totalPaymentCartao.toFixed(2)}</p></div>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+
+          ${state.activeTab === 'entregar_produtos' ? `
+            <div class="space-y-4">
+              <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs text-xs">
+                👋 <strong>Olá, ${state.sellerName}!</strong> Pegue a ficha física paga pelo cliente e registre a entrega dando baixa abaixo:
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                ${state.items.map(item => {
+                  const isOutOfStock = item.stock <= 0;
+                  const isLowStock = item.stock > 0 && item.stock <= 5;
+                  const tokenColor = parseFloat(item.price) === 7.50 ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
+                  const labelFicha = parseFloat(item.price) === 7.50 ? 'Ficha Especial (R$ 7,50)' : 'Ficha Comum (R$ 5,00)';
+
+                  return `
+                    <div class="bg-white rounded-2xl border p-4 shadow-xs flex flex-col justify-between ${isOutOfStock ? 'border-red-300 bg-red-50/30 opacity-70' : 'border-amber-200'}">
+                      <div>
+                        <div class="flex justify-between items-start">
+                          <span class="text-[9px] font-extrabold px-2 py-0.5 rounded-md uppercase ${tokenColor}">${labelFicha}</span>
+                          <span class="text-xs font-bold text-slate-400">Estoque</span>
+                        </div>
+                        <div class="flex justify-between items-center mt-1">
+                          <h3 class="text-base font-black text-slate-800">${item.name}</h3>
+                          <span class="text-sm font-black ${isOutOfStock ? 'text-red-600' : isLowStock ? 'text-orange-500 animate-pulse' : 'text-emerald-600'}">
+                            ${isOutOfStock ? 'Esgotado! ❌' : `${item.stock} un`}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div class="mt-4 pt-3 border-t border-slate-100 flex gap-2">
+                        <button
+                          onclick="handleDeliverProduct('${item.id}', 5)"
+                          ${isOutOfStock || item.stock < 5 ? 'disabled' : ''}
+                          class="px-2.5 py-2.5 text-xs font-bold rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-700 transition ${isOutOfStock || item.stock < 5 ? 'opacity-50 cursor-not-allowed' : ''}"
+                        >
+                          -5 un
+                        </button>
+                        <button
+                          onclick="handleDeliverProduct('${item.id}', 1)"
+                          ${isOutOfStock ? 'disabled' : ''}
+                          class="flex-1 py-2.5 text-xs font-black rounded-lg text-white bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 transition ${isOutOfStock ? 'opacity-50 cursor-not-allowed' : ''}"
+                        >
+                          Entregar e Dar Baixa (-1)
+                        </button>
+                      </div>
+                    </div>
+                  `;
+                }).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          ${state.activeTab === 'painel' ? `
+            <div class="space-y-4">
+              <!-- Quadro Comparativo de Auditoria -->
+              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
+                <h3 class="font-extrabold text-slate-800 text-base mb-1">Auditoria de Vendas vs. Entregas Físicas</h3>
+                <p class="text-xs text-slate-500">Compare quantas fichas de cada valor foram vendidas pelo caixa com as baixas que as barracas deram.</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 pt-3 border-t border-slate-100">
+                  <div class="bg-amber-50/40 p-4 rounded-xl border border-amber-200">
+                    <h4 class="font-extrabold text-slate-800 text-sm mb-2">Fichas de R$ 5,00 (Comum)</h4>
+                    <div class="space-y-1.5 text-xs">
+                      <div class="flex justify-between"><span class="text-slate-500">Fichas Vendidas no Caixa:</span><span class="font-bold text-slate-800">${totalFichasComunsVendidas} un</span></div>
+                      <div class="flex justify-between"><span class="text-slate-500">Baixas dadas pelas Barracas:</span><span class="font-bold text-emerald-600">${totalFichasComunsEntregues} un</span></div>
+                      <div class="flex justify-between pt-1.5 border-t border-dashed border-amber-200 font-extrabold">
+                        <span class="text-slate-700">Fichas com Clientes (Em circulação):</span><span class="text-orange-600">${fichasComunsEmCirculacao} un</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="bg-red-50/30 p-4 rounded-xl border border-red-200">
+                    <h4 class="font-extrabold text-slate-800 text-sm mb-2">Fichas de R$ 7,50 (Especial)</h4>
+                    <div class="space-y-1.5 text-xs">
+                      <div class="flex justify-between"><span class="text-slate-500">Fichas Vendidas no Caixa:</span><span class="font-bold text-slate-800">${totalFichasEspeciaisVendidas} un</span></div>
+                      <div class="flex justify-between"><span class="text-slate-500">Baixas dadas pelas Barracas:</span><span class="font-bold text-emerald-600">${totalFichasEspeciaisEntregues} un</span></div>
+                      <div class="flex justify-between pt-1.5 border-t border-dashed border-red-200 font-extrabold">
+                        <span class="text-slate-700">Fichas com Clientes (Em circulação):</span><span class="text-orange-600">${fichasEspeciaisEmCirculacao} un</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Estoque das Barracas -->
+              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
+                <h3 class="font-extrabold text-slate-800 text-sm mb-3">Estoque Geral de Produtos</h3>
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  ${state.items.map(i => `
+                    <div class="bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs">
+                      <p class="font-black text-slate-800 truncate">${i.name}</p>
+                      <div class="flex justify-between items-center mt-1">
+                        <span class="text-[10px] text-slate-400">Restam:</span>
+                        <span class="font-black ${i.stock === 0 ? 'text-red-600' : 'text-slate-700'}">${i.stock} un</span>
+                      </div>
+                    </div>
+                  `).join('')}
+                </div>
+              </div>
+            </div>
+          ` : ''}
+
+          ${state.activeTab === 'gerenciar' ? `
+            <div class="space-y-4">
+              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
+                <h3 class="font-extrabold text-slate-800 text-base mb-3">Cadastrar Novo Produto no Cardápio</h3>
+                <form onsubmit="handleAddNewItem(event)" class="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  <div class="col-span-1 md:col-span-2">
+                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Nome do Produto</label>
+                    <input id="newItemName" type="text" placeholder="Ex: Canjica, Milho..." class="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-orange-500 text-sm font-semibold" required />
+                  </div>
+                  <div>
+                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Qual Ficha Exige?</label>
+                    <select id="newItemPrice" class="w-full px-3 py-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:border-orange-500 text-sm font-semibold">
+                      <option value="5.00">R$ 5,00 (Ficha Comum)</option>
+                      <option value="7.50">R$ 7,50 (Ficha Especial)</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Estoque Físico</label>
+                    <input id="newItemStock" type="number" placeholder="Quantidade" class="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-orange-500 text-sm font-semibold" required />
+                  </div>
+                  <div class="col-span-1 md:col-span-2">
+                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Categoria</label>
+                    <select id="newItemCategory" class="w-full px-3 py-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:border-orange-500 text-sm font-semibold">
+                      <option value="Comida">🌽 Comida</option>
+                      <option value="Bebida">🍹 Bebida</option>
+                      <option value="Outros">🎁 Outros</option>
+                    </select>
+                  </div>
+                  <div class="col-span-1 md:col-span-4 pt-1">
+                    <button type="submit" class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2.5 px-4 rounded-xl shadow transition">Salvar Produto ✔️</button>
+                  </div>
+                </form>
+              </div>
+
+              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
+                <h3 class="font-extrabold text-slate-800 text-base mb-2">Ajustar Estoques Rapidamente</h3>
+                <div class="overflow-x-auto">
+                  <table class="w-full text-left text-xs md:text-sm">
+                    <thead>
+                      <tr class="border-b border-slate-100 text-slate-400 uppercase text-[9px] font-bold">
+                        <th class="py-2">Item</th>
+                        <th class="py-2 text-right">Ficha</th>
+                        <th class="py-2 text-center w-36">Estoque</th>
+                        <th class="py-2 text-center w-12">Remover</th>
+                      </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                      ${state.items.map(item => `
+                        <tr>
+                          <td class="py-3 font-bold text-slate-800">${item.name}</td>
+                          <td class="py-3 text-right font-bold text-slate-600">R$ ${parseFloat(item.price).toFixed(2)}</td>
+                          <td class="py-3">
+                            <div class="flex items-center justify-center gap-1.5">
+                              <button type="button" onclick="handleUpdateStockDirectly('${item.id}', ${Math.max(0, item.stock - 1)}, '${item.name}')" class="h-6 w-6 bg-slate-100 rounded-lg hover:bg-slate-200 font-bold">-</button>
+                              <input type="number" value="${item.stock}" onchange="handleUpdateStockDirectly('${item.id}', this.value, '${item.name}')" class="w-12 text-center border rounded font-bold" />
+                              <button type="button" onclick="handleUpdateStockDirectly('${item.id}', ${item.stock + 1}, '${item.name}')" class="h-6 w-6 bg-slate-100 rounded-lg hover:bg-slate-200 font-bold">+</button>
                             </div>
-                          </div>
-                          <div class="font-bold text-slate-700">
-                            R$ ${(trans.total || 0).toFixed(2)}
+                          </td>
+                          <td class="py-3 text-center">
+                            <button type="button" onclick="handleDeleteItem('${item.id}', '${item.name}')" class="text-slate-400 hover:text-red-600">Remover</button>
+                          </td>
+                        </tr>
+                      `).join('')}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ` : ''}
+
+          ${state.activeTab === 'historico_geral' ? `
+            <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
+              <h3 class="font-extrabold text-slate-800 text-base mb-1">Linha do Tempo das Atividades</h3>
+              <p class="text-xs text-slate-500 mb-4">Veja tudo o que foi vendido ou entregue nas fogueiras e caixas:</p>
+
+              ${state.transactions.length === 0 ? `
+                <p class="text-center py-8 text-slate-400 text-xs">Nenhuma atividade registrada ainda.</p>
+              ` : `
+                <div class="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto pr-1">
+                  ${state.transactions.slice(0, 50).map(trans => {
+                    const isSale = trans.type === 'VENDA_FICHA';
+                    const timeString = trans.timestamp?.seconds 
+                      ? new Date(trans.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+                      : 'Agora';
+
+                    return `
+                      <div class="py-3 flex items-center justify-between text-xs md:text-sm">
+                        <div class="flex items-start gap-2">
+                          <span class="text-lg">${isSale ? '🎟️' : '🍿'}</span>
+                          <div>
+                            <p class="font-bold text-slate-800">
+                              ${isSale ? `Vendido: ${trans.qty}x Ficha ${trans.tokenType}` : `Baixa: ${trans.qty}x ${trans.itemName}`}
+                            </p>
+                            <p class="text-[10px] text-slate-400">
+                              Por: ${trans.sellerName || 'Colaborador'} • ${timeString}
+                            </p>
                           </div>
                         </div>
-                      `;
-                    }).join('')}
-                  </div>
-                `}
-              </div>
-            ` : ''}
+                        <span class="font-bold text-slate-700">R$ ${(trans.total || 0).toFixed(2)}</span>
+                      </div>
+                    `;
+                  }).join('')}
+                </div>
+              `}
+            </div>
+          ` : ''}
 
-          </main>
+        </main>
 
-          <!-- App Footer -->
-          <footer class="text-center py-8 text-[11px] text-slate-400 border-t border-amber-100 mt-6 max-w-4xl mx-auto px-4">
-            <p class="font-bold text-slate-500">🌽 Olha o Estoque! É verdade! 🌽</p>
-            <p class="mt-1">Sistema integrado e otimizado para celulares do caixa e das barracas.</p>
-            <p class="mt-2 text-[10px]">App ID: ${appId}</p>
-          </footer>
-        `;
+        <!-- Footer -->
+        <footer class="text-center py-8 text-[11px] text-slate-400 border-t border-amber-100 mt-6 max-w-4xl mx-auto px-4">
+          <p class="font-bold text-slate-500">🌽 Olha a Fila! É verdade! 🌽</p>
+          <p class="mt-1">Sistema pronto e otimizado para celulares.</p>
+        </footer>
+      `;
 
-        if (window.lucide) {
-          window.lucide.createIcons();
-        }
+      if (window.lucide) {
+        window.lucide.createIcons();
       }
-
-      render();
     }
+
+    render();
   </script>
 </body>
 </html>
