@@ -92,7 +92,7 @@
       { id: "2", name: "Pastel", price: 5.00, stock: 40, category: "Comida" },
       { id: "3", name: "Pipoca", price: 5.00, stock: 100, category: "Comida" },
       { id: "4", name: "Refrigerante", price: 5.00, stock: 60, category: "Bebida" },
-      { id: "5", name: "Água com Gás", price: 7.50, stock: 30, category: "Bebida" }
+      { id: "5", name: "Água com Gás", price: 7.00, stock: 30, category: "Bebida" }
     ];
 
     let db = null;
@@ -264,7 +264,7 @@
         return;
       }
 
-      const priceUnit = type === 'Comum' ? 5.00 : 7.50;
+      const priceUnit = type === 'Comum' ? 5.00 : 7.00;
       const totalValue = priceUnit * q;
 
       const newTx = {
@@ -320,7 +320,7 @@
         return;
       }
 
-      const tokenTypeNeeded = parseFloat(item.price) === 7.50 ? 'Especial' : 'Comum';
+      const tokenTypeNeeded = parseFloat(item.price) === 7.00 ? 'Especial' : 'Comum';
 
       const newTx = {
         id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 9),
@@ -877,8 +877,8 @@
                   ${state.items.map(item => {
                     const isOutOfStock = item.stock <= 0;
                     const isLowStock = item.stock > 0 && item.stock <= 5;
-                    const tokenColor = parseFloat(item.price) === 7.50 ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
-                    const tokenLabel = parseFloat(item.price) === 7.50 ? 'Exige Ficha Especial' : 'Exige Ficha Comum';
+                    const tokenColor = parseFloat(item.price) === 7.00 ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
+                    const tokenLabel = parseFloat(item.price) === 7.00 ? 'Exige Ficha Especial' : 'Exige Ficha Comum';
 
                     return `
                       <div class="bg-white rounded-xl border p-3 shadow-xs flex flex-col justify-between ${
