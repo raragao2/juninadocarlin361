@@ -21,6 +21,7 @@
   <!-- Lucide Icons CDN -->
   <script src="https://unpkg.com/lucide@latest"></script>
   <style>
+    /* Estilos extras para scrollbars e customizações */
     .custom-scrollbar::-webkit-scrollbar {
       width: 6px;
     }
@@ -35,43 +36,22 @@
 </head>
 <body class="min-h-screen bg-orange-50 text-slate-800 font-sans pb-16">
 
+  <!-- APP CONTAINER (rendered dynamically by JavaScript) -->
   <div id="app">
-    <!-- Tela de carregamento rápido -->
+    <!-- Splash screen / Loading Inicial -->
     <div class="flex flex-col items-center justify-center min-h-screen bg-orange-50 p-4">
       <div class="text-center">
         <span class="text-6xl animate-bounce block mb-4">🔥</span>
-        <h2 class="text-2xl font-black text-orange-600">Carregando o Arraial...</h2>
-        <p class="text-sm text-slate-500 mt-2">Preparando as barracas e fogueira.</p>
+        <h2 class="text-2xl font-black text-orange-600">Preparando o Arraial...</h2>
+        <p class="text-sm text-slate-500 mt-2">Carregando as barracas e fogueiras locais.</p>
       </div>
     </div>
   </div>
 
-  <script type="module">
-    // Importações opcionais do Firebase para quando o usuário decidir ativar o sincronismo
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
-    import { getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-
-    // Credenciais vazias por padrão (O sistema usará o armazenamento local automaticamente se estiver vazio)
-    const firebaseConfig = {
-      apiKey: "",
-      authDomain: "",
-      projectId: "",
-      storageBucket: "",
-      messagingSenderId: "",
-      appId: ""
-    };
-
-    // Identifica se temos o Firebase ativo para conectar as pessoas em tempo real
-    const isFirebaseActive = !!(firebaseConfig.apiKey && firebaseConfig.apiKey !== "");
-
-    let db = null;
-    let auth = null;
-    const appId = "festa-junina-baixas";
-
-    // ESTADO GLOBAL DO APLICATIVO
+  <!-- APPLICATION LOGIC (100% Offline & Sincronizável por Código) -->
+  <script>
+    // ESTADO GLOBAL DO APLICATIVO (Salvo 100% no LocalStorage)
     const state = {
-      user: null,
       operatorRole: localStorage.getItem('junina_role') || 'BARRACA',
       sellerName: localStorage.getItem('junina_seller_name') || '',
       isSettingName: !localStorage.getItem('junina_seller_name'),
@@ -81,17 +61,12 @@
       transactions: [],
       activeTab: localStorage.getItem('junina_role') === 'CAIXA' ? 'vender_fichas' : 'entregar_produtos',
       alertMessage: null,
-      isSyncing: false,
       confirmDeleteData: null,
       paymentMethod: 'Dinheiro',
-      // Modos de Configuração do Firebase pelo Painel
-      firebaseApiKey: localStorage.getItem('fb_apiKey') || '',
-      firebaseProjectId: localStorage.getItem('fb_projectId') || '',
-      firebaseAppId: localStorage.getItem('fb_appId') || ''
+      importCode: ''
     };
 
-    
-    // Fallback de dados iniciais padrão para a festa ficar bonita de cara se não houver dados salvos
+    // Dados de demonstração para inicializar a festa bonita na primeira abertura
     const defaultItems = [
       { id: "1", name: "Salsichão", price: 5.00, stock: 50, category: "Comida" },
       { id: "2", name: "Pastel", price: 5.00, stock: 40, category: "Comida" },
@@ -100,94 +75,42 @@
       { id: "5", name: "Água com Gás", price: 7.50, stock: 30, category: "Bebida" }
     ];
 
-    // Carrega dados iniciais do LocalStorage ou do Mock
-    if (!localStorage.getItem('local_items')) {
-      localStorage.setItem('local_items', JSON.stringify(defaultItems));
-    }
-    if (!localStorage.getItem('local_transactions')) {
-      localStorage.setItem('local_transactions', JSON.stringify([]));
-    }
+    // Carregamento inicial seguro
+    function loadLocalData() {
+      try {
+        const localItems = localStorage.getItem('local_items');
+        if (!localItems) {
+          localStorage.setItem('local_items', JSON.stringify(defaultItems));
+          state.items = defaultItems;
+        } else {
+          state.items = JSON.parse(localItems);
+        }
 
-    // Gerenciador de Banco de Dados Híbrido (Local ou Firebase)
-    const database = {
-      async getItems() {
-        if (isFirebaseActive && db) {
-          // Obtido via OnSnapshot em tempo real
-          return state.items;
+        const localTx = localStorage.getItem('local_transactions');
+        if (!localTx) {
+          localStorage.setItem('local_transactions', JSON.stringify([]));
+          state.transactions = [];
         } else {
-          return JSON.parse(localStorage.getItem('local_items') || '[]');
+          state.transactions = JSON.parse(localTx);
         }
-      },
-      async saveItem(item) {
-        if (isFirebaseActive && db) {
-          const itemsColRef = collection(db, 'artifacts', appId, 'public', 'data', 'items');
-          await setDoc(doc(itemsColRef, item.id || crypto.randomUUID()), {
-            name: item.name,
-            price: item.price,
-            stock: item.stock,
-            category: item.category,
-            createdAt: serverTimestamp()
-          });
-        } else {
-          const localItems = JSON.parse(localStorage.getItem('local_items') || '[]');
-          const existsIndex = localItems.findIndex(i => i.id === item.id);
-          if (existsIndex > -1) {
-            localItems[existsIndex] = item;
-          } else {
-            item.id = crypto.randomUUID();
-            localItems.push(item);
-          }
-          localStorage.setItem('local_items', JSON.stringify(localItems));
-          state.items = localItems;
-          render();
-        }
-      },
-      async updateStock(itemId, newStock) {
-        if (isFirebaseActive && db) {
-          const itemDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'items', itemId);
-          await updateDoc(itemDocRef, { stock: parseInt(newStock) });
-        } else {
-          const localItems = JSON.parse(localStorage.getItem('local_items') || '[]');
-          const item = localItems.find(i => i.id === itemId);
-          if (item) {
-            item.stock = parseInt(newStock);
-            localStorage.setItem('local_items', JSON.stringify(localItems));
-            state.items = localItems;
-            render();
-          }
-        }
-      },
-      async deleteItem(itemId) {
-        if (isFirebaseActive && db) {
-          const itemDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'items', itemId);
-          await deleteDoc(itemDocRef);
-        } else {
-          const localItems = JSON.parse(localStorage.getItem('local_items') || '[]');
-          const filtered = localItems.filter(i => i.id !== itemId);
-          localStorage.setItem('local_items', JSON.stringify(filtered));
-          state.items = filtered;
-          render();
-        }
-      },
-      async addTransaction(tx) {
-        if (isFirebaseActive && db) {
-          const transColRef = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
-          await addDoc(transColRef, {
-            ...tx,
-            timestamp: serverTimestamp()
-          });
-        } else {
-          const localTx = JSON.parse(localStorage.getItem('local_transactions') || '[]');
-          tx.id = crypto.randomUUID();
-          tx.timestamp = { seconds: Math.floor(Date.now() / 1000) };
-          localTx.unshift(tx);
-          localStorage.setItem('local_transactions', JSON.stringify(localTx));
-          state.transactions = localTx;
-          render();
-        }
+      } catch (e) {
+        console.error("Erro ao carregar dados locais, reiniciando padrões:", e);
+        state.items = defaultItems;
+        state.transactions = [];
       }
-    };
+    }
 
+    // Salva o estado atual no armazenamento local
+    function saveLocalData() {
+      try {
+        localStorage.setItem('local_items', JSON.stringify(state.items));
+        localStorage.setItem('local_transactions', JSON.stringify(state.transactions));
+      } catch (e) {
+        console.error("Falha ao salvar dados localmente:", e);
+      }
+    }
+
+    // Alertas customizados sem usar alert()
     window.showAlert = function(text, type = 'info') {
       state.alertMessage = { text, type };
       render();
@@ -197,54 +120,32 @@
       }, 4000);
     };
 
-    // Tenta conectar ao Firebase caso configurado
-    if (isFirebaseActive) {
-      try {
-        const fbApp = initializeApp(firebaseConfig);
-        auth = getAuth(fbApp);
-        db = getFirestore(fbApp);
-        
-        state.isSyncing = true;
-        
-        signInAnonymously(auth).then(() => {
-          onAuthStateChanged(auth, (currentUser) => {
-            state.user = currentUser;
-            if (currentUser) {
-              // Escuta em tempo real do Firebase
-              const itemsCol = collection(db, 'artifacts', appId, 'public', 'data', 'items');
-              const transCol = collection(db, 'artifacts', appId, 'public', 'data', 'transactions');
+    // Navegação de abas
+    window.setActiveTab = function(tab) {
+      state.activeTab = tab;
+      render();
+    };
 
-              onSnapshot(itemsCol, (snapshot) => {
-                const list = [];
-                snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
-                list.sort((a, b) => a.name.localeCompare(b.name));
-                state.items = list;
-                state.isSyncing = false;
-                render();
-              });
+    window.setPaymentMethod = function(method) {
+      state.paymentMethod = method;
+      render();
+    };
 
-              onSnapshot(transCol, (snapshot) => {
-                const list = [];
-                snapshot.forEach(doc => list.push({ id: doc.id, ...doc.data() }));
-                list.sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0));
-                state.transactions = list;
-                render();
-              });
-            }
-          });
-        });
-      } catch (e) {
-        console.error("Falha ao inicializar o Firebase:", e);
-        isFirebaseActive = false;
-      }
-    } else {
-      // Carregamento rápido offline
-      state.items = JSON.parse(localStorage.getItem('local_items') || '[]');
-      state.transactions = JSON.parse(localStorage.getItem('local_transactions') || '[]');
-    }
+    window.selectTempRole = function(role) {
+      state.tempRole = role;
+      render();
+    };
 
-    window.handleSaveOperator = async (e) => {
-      e.preventDefault();
+    window.handleChangeRole = function() {
+      state.tempSellerName = state.sellerName;
+      state.tempRole = state.operatorRole;
+      state.isSettingName = true;
+      render();
+    };
+
+    // Salva a identificação do colaborador
+    window.handleSaveOperator = function(e) {
+      if (e) e.preventDefault();
       const inputName = document.getElementById('inputSellerName').value.trim();
       if (!inputName) {
         window.showAlert("Por favor, digite seu nome ou barraca!", "warning");
@@ -270,29 +171,8 @@
       render();
     };
 
-    window.selectTempRole = (role) => {
-      state.tempRole = role;
-      render();
-    };
-
-    window.handleChangeRole = () => {
-      state.tempSellerName = state.sellerName;
-      state.tempRole = state.operatorRole;
-      state.isSettingName = true;
-      render();
-    };
-
-    window.setActiveTab = (tab) => {
-      state.activeTab = tab;
-      render();
-    };
-
-    window.setPaymentMethod = (method) => {
-      state.paymentMethod = method;
-      render();
-    };
-
-    window.handleSellTokens = async (type, qty) => {
+    // Venda de fichas de R$ 5,00 ou R$ 7,50
+    window.handleSellTokens = function(type, qty) {
       if (!state.sellerName) {
         state.isSettingName = true;
         render();
@@ -308,28 +188,36 @@
       const priceUnit = type === 'Comum' ? 5.00 : 7.50;
       const totalValue = priceUnit * q;
 
-      await database.addTransaction({
+      const newTx = {
+        id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 9),
         type: 'VENDA_FICHA',
         tokenType: type,
         qty: q,
         price: priceUnit,
         total: totalValue,
         paymentMethod: state.paymentMethod,
-        sellerName: state.sellerName
-      });
+        sellerName: state.sellerName,
+        timestamp: Math.floor(Date.now() / 1000)
+      };
 
+      state.transactions.unshift(newTx);
+      saveLocalData();
+      render();
       window.showAlert(`🎟️ Vendido: ${q}x Ficha ${type} (R$ ${totalValue.toFixed(2)})!`, "success");
     };
 
-    window.handleDeliverProduct = async (itemId, qtyToDeliver) => {
+    // Entrega física do produto com baixa no estoque
+    window.handleDeliverProduct = function(itemId, qtyToDeliver) {
       if (!state.sellerName) {
         state.isSettingName = true;
         render();
         return;
       }
 
-      const item = state.items.find(i => i.id === itemId);
-      if (!item) return;
+      const itemIndex = state.items.findIndex(i => i.id === itemId);
+      if (itemIndex === -1) return;
+
+      const item = state.items[itemIndex];
 
       if (item.stock <= 0) {
         window.showAlert(`🚫 Estoque físico ESGOTADO para: ${item.name}!`, "error");
@@ -337,18 +225,18 @@
       }
 
       if (item.stock < qtyToDeliver) {
-        window.showAlert(`⚠️ Apenas ${item.stock} unidades disponíveis no estoque!`, "warning");
+        window.showAlert(`⚠️ Apenas ${item.stock} unidades disponíveis!`, "warning");
         return;
       }
 
       const tokenTypeNeeded = parseFloat(item.price) === 7.50 ? 'Especial' : 'Comum';
 
-      // Deduz o estoque
-      const updatedStock = item.stock - qtyToDeliver;
-      await database.updateStock(item.id, updatedStock);
+      // Atualiza estoque localmente
+      item.stock -= qtyToDeliver;
 
-      // Registra a transação de baixa
-      await database.addTransaction({
+      // Adiciona transação de baixa
+      const newTx = {
+        id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 9),
         type: 'ENTREGA_PRODUTO',
         itemId: item.id,
         itemName: item.name,
@@ -356,14 +244,19 @@
         tokenTypeUsed: tokenTypeNeeded,
         price: parseFloat(item.price),
         total: parseFloat(item.price) * qtyToDeliver,
-        sellerName: state.sellerName
-      });
+        sellerName: state.sellerName,
+        timestamp: Math.floor(Date.now() / 1000)
+      };
 
-      window.showAlert(`✅ Baixa registrada! ${qtyToDeliver}x "${item.name}" entregue.`, "success");
+      state.transactions.unshift(newTx);
+      saveLocalData();
+      render();
+      window.showAlert(`✅ Entrega feita! Baixa de ${qtyToDeliver}x "${item.name}" registrada.`, "success");
     };
 
-    window.handleAddNewItem = async (e) => {
-      e.preventDefault();
+    // Adicionar um novo item ao cardápio de vendas
+    window.handleAddNewItem = function(e) {
+      if (e) e.preventDefault();
       const name = document.getElementById('newItemName').value.trim();
       const price = parseFloat(document.getElementById('newItemPrice').value);
       const stock = parseInt(document.getElementById('newItemStock').value);
@@ -374,46 +267,112 @@
         return;
       }
 
-      await database.saveItem({
-        id: crypto.randomUUID(),
+      const newItem = {
+        id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 9),
         name,
         price,
         stock,
         category
-      });
+      };
 
+      state.items.push(newItem);
+      state.items.sort((a, b) => a.name.localeCompare(b.name));
+      saveLocalData();
+      render();
       window.showAlert(`🎉 "${name}" inserido com sucesso!`, "success");
+      
+      // Limpa formulário
       document.getElementById('newItemName').value = '';
       document.getElementById('newItemStock').value = '';
     };
 
-    window.handleUpdateStockDirectly = async (itemId, newStockValue, itemName) => {
-      await database.updateStock(itemId, newStockValue);
-      window.showAlert(`Estoque de "${itemName}" ajustado para ${newStockValue}.`, "info");
+    // Ajusta o estoque diretamente na tabela de produtos
+    window.handleUpdateStockDirectly = function(itemId, newStockValue, itemName) {
+      const val = parseInt(newStockValue);
+      if (isNaN(val) || val < 0) return;
+
+      const item = state.items.find(i => i.id === itemId);
+      if (item) {
+        item.stock = val;
+        saveLocalData();
+        render();
+        window.showAlert(`Estoque de "${itemName}" ajustado para ${val}.`, "info");
+      }
     };
 
-    window.handleDeleteItem = (itemId, itemName) => {
+    // Modal de confirmação de exclusão
+    window.handleDeleteItem = function(itemId, itemName) {
       state.confirmDeleteData = { id: itemId, name: itemName };
       render();
     };
 
-    window.closeDeleteModal = () => {
+    window.closeDeleteModal = function() {
       state.confirmDeleteData = null;
       render();
     };
 
-    window.executeDeleteItem = async () => {
+    window.executeDeleteItem = function() {
       if (!state.confirmDeleteData) return;
-      await database.deleteItem(state.confirmDeleteData.id);
+      state.items = state.items.filter(i => i.id !== state.confirmDeleteData.id);
+      saveLocalData();
       window.showAlert(`🗑️ "${state.confirmDeleteData.name}" removido do cardápio.`, "info");
       state.confirmDeleteData = null;
       render();
     };
 
+    // Gera uma string compactada contendo todo o estoque e histórico de vendas atual do telefone
+    window.handleExportData = function() {
+      const exportObject = {
+        items: state.items,
+        transactions: state.transactions
+      };
+      
+      // Converte para base64 compactado seguro
+      const payload = btoa(unescape(encodeURIComponent(JSON.stringify(exportObject))));
+      
+      // Copiar para área de transferência via fallback robusto para celular
+      const tempInput = document.createElement('textarea');
+      tempInput.value = payload;
+      document.body.appendChild(tempInput);
+      tempInput.select();
+      document.execCommand('copy');
+      document.body.removeChild(tempInput);
+
+      window.showAlert("📋 Código copiado! Envie no WhatsApp dos outros 3 celulares.", "success");
+    };
+
+    // Importa o estoque e histórico enviado por outro operador
+    window.handleImportData = function(e) {
+      if (e) e.preventDefault();
+      const code = document.getElementById('inputImportCode').value.trim();
+      if (!code) {
+        window.showAlert("Cole o código recebido antes de confirmar!", "warning");
+        return;
+      }
+
+      try {
+        const decoded = JSON.parse(decodeURIComponent(escape(atob(code))));
+        if (decoded.items && decoded.transactions) {
+          state.items = decoded.items;
+          state.transactions = decoded.transactions;
+          saveLocalData();
+          window.showAlert("⚡ Estoque e vendas atualizados com sucesso!", "success");
+          document.getElementById('inputImportCode').value = '';
+          render();
+        } else {
+          window.showAlert("Código inválido ou incompleto!", "error");
+        }
+      } catch (err) {
+        console.error(err);
+        window.showAlert("Erro ao processar o código. Certifique-se de copiar o texto completo.", "error");
+      }
+    };
+
+    // RENDERIZADOR PRINCIPAL DO APLICATIVO
     function render() {
       const appEl = document.getElementById('app');
-      
-      // Métrica de cálculos
+
+      // Métricas calculadas em tempo real
       const totalFichasComunsVendidas = state.transactions
         .filter(t => t.type === 'VENDA_FICHA' && t.tokenType === 'Comum')
         .reduce((sum, t) => sum + (t.qty || 0), 0);
@@ -453,7 +412,7 @@
       const outOfStockItems = state.items.filter(item => item.stock === 0);
 
       appEl.innerHTML = `
-        <!-- Banner de Festa Junina -->
+        <!-- Festive Top Header -->
         <div class="bg-gradient-to-r from-amber-600 via-orange-500 to-red-600 text-white relative overflow-hidden shadow-lg">
           <div class="absolute top-0 left-0 w-full flex justify-around opacity-40 select-none pointer-events-none text-lg">
             <span>🔺</span><span class="text-yellow-300">🔻</span>
@@ -463,59 +422,56 @@
             <span>🔺</span><span class="text-yellow-300">🔻</span>
           </div>
           
-          <div class="max-w-4xl mx-auto px-4 py-6 text-center relative z-10">
+          <div class="max-w-4xl mx-auto px-4 py-5 text-center relative z-10">
             <div class="flex items-center justify-center gap-2 mb-1">
-              <span class="text-3xl animate-bounce">🔥</span>
-              <h1 class="text-2xl md:text-4xl font-extrabold tracking-tight font-serif text-yellow-300 drop-shadow-md">
+              <span class="text-2xl animate-bounce">🔥</span>
+              <h1 class="text-xl md:text-3xl font-extrabold tracking-tight font-serif text-yellow-300 drop-shadow-md">
                 ARRAIAL CONCILIA SYNC
               </h1>
-              <span class="text-3xl animate-bounce">🌽</span>
+              <span class="text-2xl animate-bounce">🌽</span>
             </div>
-            <p class="text-xs md:text-sm text-orange-100 font-bold tracking-widest uppercase">
-              Controle de Caixas, Fichas de Valores e Baixas Rápidas de Estoque
+            <p class="text-[10px] md:text-xs text-orange-100 font-bold tracking-widest uppercase">
+              Controle Exclusivo de Fichas, Caixas e Baixa Rápida de Estoque
             </p>
           </div>
         </div>
 
-        <!-- Alerta de Conexão Local / Offline -->
-        <div class="bg-amber-100 border-b border-amber-200 py-2 px-4 text-xs">
-          <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-2 text-slate-700">
-            <div class="flex items-center gap-2 font-bold">
-              <span class="relative flex h-2.5 w-2.5">
-                <span class="relative inline-flex rounded-full h-2.5 w-2.5 ${isFirebaseActive ? 'bg-emerald-500' : 'bg-orange-500 animate-pulse'}"></span>
+        <!-- Connection and Configuration Header Bar -->
+        <div class="bg-amber-100 border-b border-amber-200 py-1.5 px-4 text-[11px]">
+          <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-2 text-slate-600">
+            <div class="flex items-center gap-2 font-medium">
+              <span class="relative flex h-2 w-2">
+                <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
               </span>
-              <span>
-                ${isFirebaseActive 
-                  ? '🌐 Sincronizado em Nuvem (Multi-Celulares Ativo)' 
-                  : '📲 Modo Local (Dados salvos neste aparelho. Sem complicação com Firebase!)'}
-              </span>
+              <span>📲 Sistema em Modo Local Ativo (Super Rápido)</span>
             </div>
             
             <div class="flex items-center gap-2">
               ${state.sellerName ? `
                 <button 
                   onclick="handleChangeRole()"
-                  class="flex items-center gap-1.5 bg-white px-2.5 py-1 rounded-full text-slate-700 font-bold shadow-xs transition text-[11px]"
+                  class="flex items-center gap-1 bg-white px-2.5 py-0.5 rounded-full text-slate-700 font-bold shadow-xs transition"
                 >
                   <i data-lucide="users" class="w-3 h-3 text-orange-600"></i>
-                  <span>Colaborador: <strong class="text-orange-700">${state.sellerName}</strong></span>
-                  <span class="bg-orange-100 text-orange-800 text-[9px] px-1.5 py-0.25 rounded-md font-black uppercase">
+                  <span>Operador: <strong class="text-orange-700">${state.sellerName}</strong></span>
+                  <span class="bg-orange-100 text-orange-800 text-[8px] px-1.5 py-0.25 rounded uppercase">
                     ${state.operatorRole === 'CAIXA' ? 'Caixa' : state.operatorRole === 'BARRACA' ? 'Barraca' : 'Gestão'}
                   </span>
-                  <span class="text-[10px] text-blue-600 underline ml-0.5">(Trocar)</span>
+                  <span class="text-[9px] text-blue-600 underline ml-0.5">(Alterar)</span>
                 </button>
               ` : `
                 <button 
                   onclick="handleChangeRole()"
-                  class="bg-orange-500 hover:bg-orange-600 text-white font-bold px-3 py-1 rounded-full text-[11px]"
+                  class="bg-orange-500 text-white font-bold px-3 py-0.5 rounded-full"
                 >
-                  Entrar como Colaborador
+                  Identificar Operador
                 </button>
               `}
             </div>
           </div>
         </div>
 
+        <!-- Pop-up Alerts -->
         ${state.alertMessage ? `
           <div class="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 w-11/12 max-w-sm shadow-2xl rounded-2xl overflow-hidden animate-bounce">
             <div class="p-4 flex items-center justify-between text-white font-bold ${
@@ -530,50 +486,64 @@
           </div>
         ` : ''}
 
-        <!-- Confirmação de exclusão de produto -->
+        <!-- Delete Item Confirm Modal -->
         ${state.confirmDeleteData ? `
           <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
-            <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border-2 border-red-500">
-              <h3 class="text-lg font-bold text-slate-900">⚠️ Confirmar Remoção</h3>
-              <p class="text-sm text-slate-600 mt-2">
-                Tem certeza de que deseja remover o produto <strong>"${state.confirmDeleteData.name}"</strong>? Ele sumirá das opções de baixa das barracas.
+            <div class="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border-2 border-red-500">
+              <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">
+                ⚠️ Confirmar Remoção
+              </h3>
+              <p class="text-xs text-slate-600 mt-2">
+                Deseja mesmo remover o item <strong>"${state.confirmDeleteData.name}"</strong>? O produto sairá do estoque das barracas.
               </p>
-              <div class="mt-4 flex gap-3 justify-end">
-                <button onclick="closeDeleteModal()" class="px-4 py-2 text-sm font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl">Voltar</button>
-                <button onclick="executeDeleteItem()" class="px-4 py-2 text-sm font-bold bg-red-600 hover:bg-red-700 text-white rounded-xl">Deletar do Cardápio</button>
+              <div class="mt-4 flex gap-2 justify-end text-xs">
+                <button
+                  onclick="closeDeleteModal()"
+                  class="px-3 py-1.5 font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
+                >
+                  Voltar
+                </button>
+                <button
+                  onclick="executeDeleteItem()"
+                  class="px-3 py-1.5 font-bold bg-red-600 hover:bg-red-700 text-white rounded-lg"
+                >
+                  Deletar Item
+                </button>
               </div>
             </div>
           </div>
         ` : ''}
 
+        <!-- MAIN APPLICATION CONTAINER -->
         <main class="max-w-4xl mx-auto px-3 py-4">
 
+          <!-- Initial Operator Selection Overlap -->
           ${state.isSettingName ? `
             <div class="fixed inset-0 bg-slate-900/70 backdrop-blur-sm z-40 flex items-center justify-center p-4">
-              <div class="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border-2 border-amber-500">
-                <div class="text-center mb-4">
-                  <span class="text-4xl block mb-2">🤠</span>
-                  <h3 class="text-xl font-black text-slate-800">Selecione seu Perfil</h3>
-                  <p class="text-xs text-slate-500 mt-1">
-                    Os caixas vendem as fichas físicas de R$ 5,00 ou R$ 7,50. Cada barraca recebe as fichas correspondentes e dá a baixa do produto entregue!
+              <div class="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border-2 border-amber-500">
+                <div class="text-center mb-3">
+                  <span class="text-3xl block mb-1">🤠</span>
+                  <h3 class="text-lg font-black text-slate-800">Selecione seu Perfil</h3>
+                  <p class="text-[11px] text-slate-500 mt-0.5">
+                    Os caixas vendem as fichas físicas (Comum/Especial). As barracas recolhem as fichas e dão as baixas correspondentes nos produtos!
                   </p>
                 </div>
-                <form onsubmit="handleSaveOperator(event)" class="space-y-4">
+                <form onsubmit="handleSaveOperator(event)" class="space-y-3 text-xs">
                   <div>
-                    <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Seu Nome / Identificação</label>
+                    <label class="block text-[10px] font-bold text-slate-600 uppercase mb-1">Seu Nome / Função</label>
                     <input
                       id="inputSellerName"
                       type="text"
-                      placeholder="Ex: Pedro Caixa, Barraca Pipoca..."
+                      placeholder="Ex: Pedro Caixa, Barraca Espetinho..."
                       value="${state.tempSellerName}"
-                      class="w-full px-3 py-2.5 border-2 border-amber-200 rounded-xl focus:outline-none focus:border-orange-500 text-center text-base font-bold"
+                      class="w-full px-3 py-2 border-2 border-amber-200 rounded-xl focus:outline-none focus:border-orange-500 text-center text-sm font-bold"
                       maxlength="20"
                       required
                     />
                   </div>
 
                   <div>
-                    <label class="block text-xs font-bold text-slate-600 uppercase mb-1">Sua Função</label>
+                    <label class="block text-[10px] font-bold text-slate-600 uppercase mb-1">Sua Função neste Evento</label>
                     <div class="grid grid-cols-3 gap-1.5">
                       <button
                         type="button"
@@ -584,8 +554,8 @@
                             : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
                         }"
                       >
-                        <i data-lucide="dollar-sign" class="w-4 h-4"></i>
-                        <span class="text-[10px]">Vende Fichas</span>
+                        <i data-lucide="dollar-sign" class="w-3.5 h-3.5"></i>
+                        <span class="text-[9px]">Vende Ficha</span>
                       </button>
 
                       <button
@@ -597,8 +567,8 @@
                             : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
                         }"
                       >
-                        <i data-lucide="truck" class="w-4 h-4"></i>
-                        <span class="text-[10px]">Entrega Item</span>
+                        <i data-lucide="truck" class="w-3.5 h-3.5"></i>
+                        <span class="text-[9px]">Dá Baixas</span>
                       </button>
 
                       <button
@@ -610,15 +580,15 @@
                             : 'border-slate-100 bg-slate-50 text-slate-600 hover:bg-slate-100'
                         }"
                       >
-                        <i data-lucide="sliders" class="w-4 h-4"></i>
-                        <span class="text-[10px]">Gestão</span>
+                        <i data-lucide="sliders" class="w-3.5 h-3.5"></i>
+                        <span class="text-[9px]">Gestor</span>
                       </button>
                     </div>
                   </div>
 
                   <button
                     type="submit"
-                    class="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-bold py-3 px-4 rounded-xl shadow-md transition transform active:scale-95"
+                    class="w-full bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 text-white font-bold py-2.5 rounded-xl shadow transition"
                   >
                     Confirmar Perfil 🎉
                   </button>
@@ -627,55 +597,64 @@
             </div>
           ` : ''}
 
-          <!-- Quadro de Indicadores Rápidos -->
+          <!-- Dashboard Metric Cards -->
           <section class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4">
-            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-              <div class="p-2 bg-emerald-100 rounded-lg text-emerald-700 shrink-0">
-                <i data-lucide="dollar-sign" class="w-4.5 h-4.5"></i>
+            <div class="bg-white rounded-xl p-2.5 border border-amber-200 shadow-xs flex items-center gap-2">
+              <div class="p-1.5 bg-emerald-100 rounded text-emerald-700 shrink-0">
+                <i data-lucide="dollar-sign" class="w-4 h-4"></i>
               </div>
               <div>
-                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Total Vendas</p>
-                <p class="text-sm md:text-base font-black text-slate-800">R$ ${revenueCaixa.toFixed(2)}</p>
+                <p class="text-[8px] uppercase font-bold tracking-wider text-slate-400">Total Caixa</p>
+                <p class="text-xs md:text-sm font-black text-slate-800">R$ ${revenueCaixa.toFixed(2)}</p>
               </div>
             </div>
 
-            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-              <div class="p-2 bg-amber-100 rounded-lg text-amber-700 shrink-0">
-                <i data-lucide="layers" class="w-4.5 h-4.5"></i>
+            <div class="bg-white rounded-xl p-2.5 border border-amber-200 shadow-xs flex items-center gap-2">
+              <div class="p-1.5 bg-amber-100 rounded text-amber-700 shrink-0">
+                <i data-lucide="layers" class="w-4 h-4"></i>
               </div>
               <div>
-                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Fichas com Clientes</p>
-                <p class="text-sm md:text-base font-black text-amber-600">${fichasComunsEmCirculacao + fichasEspeciaisEmCirculacao} un</p>
+                <p class="text-[8px] uppercase font-bold tracking-wider text-slate-400">Fichas com Clientes</p>
+                <p class="text-xs md:text-sm font-black text-amber-600">${fichasComunsEmCirculacao + fichasEspeciaisEmCirculacao} un</p>
               </div>
             </div>
 
-            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-              <div class="p-2 rounded-lg shrink-0 ${lowStockItems.length > 0 ? 'bg-orange-100 text-orange-700 animate-pulse' : 'bg-slate-100 text-slate-400'}">
-                <i data-lucide="alert-triangle" class="w-4.5 h-4.5"></i>
+            <div class="bg-white rounded-xl p-2.5 border border-amber-200 shadow-xs flex items-center gap-2">
+              <div class="p-1.5 rounded text-orange-700 shrink-0 ${lowStockItems.length > 0 ? 'bg-orange-100' : 'bg-slate-100 text-slate-400'}">
+                <i data-lucide="alert-triangle" class="w-4 h-4"></i>
               </div>
               <div>
-                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Estoque Baixo</p>
-                <p class="text-sm md:text-base font-black ${lowStockItems.length > 0 ? 'text-orange-600' : 'text-slate-700'}">${lowStockItems.length} itens</p>
+                <p class="text-[8px] uppercase font-bold tracking-wider text-slate-400">Estoque Baixo</p>
+                <p class="text-xs md:text-sm font-black ${lowStockItems.length > 0 ? 'text-orange-600' : 'text-slate-700'}">${lowStockItems.length} itens</p>
               </div>
             </div>
 
-            <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs flex items-center gap-2.5">
-              <div class="p-2 rounded-lg shrink-0 ${outOfStockItems.length > 0 ? 'bg-red-100 text-red-600' : 'bg-slate-100 text-slate-400'}">
-                <i data-lucide="package" class="w-4.5 h-4.5"></i>
+            <div class="bg-white rounded-xl p-2.5 border border-amber-200 shadow-xs flex items-center gap-2">
+              <div class="p-1.5 rounded text-red-600 shrink-0 ${outOfStockItems.length > 0 ? 'bg-red-100' : 'bg-slate-100 text-slate-400'}">
+                <i data-lucide="package" class="w-4 h-4"></i>
               </div>
               <div>
-                <p class="text-[9px] uppercase font-bold tracking-wider text-slate-400">Esgotados</p>
-                <p class="text-sm md:text-base font-black ${outOfStockItems.length > 0 ? 'text-red-600' : 'text-slate-700'}">${outOfStockItems.length} itens</p>
+                <p class="text-[8px] uppercase font-bold tracking-wider text-slate-400">Esgotados</p>
+                <p class="text-xs md:text-sm font-black ${outOfStockItems.length > 0 ? 'text-red-600' : 'text-slate-700'}">${outOfStockItems.length} itens</p>
               </div>
             </div>
           </section>
 
-          <!-- Abas de Navegação -->
+          ${lowStockItems.length > 0 ? `
+            <div class="bg-amber-100 border-l-4 border-amber-500 text-amber-900 p-2.5 rounded-r-xl mb-4 text-xs flex justify-between items-center">
+              <div class="flex items-center gap-1.5">
+                <i data-lucide="alert-triangle" class="text-amber-600 w-4 h-4 shrink-0"></i>
+                <span>Estoque Crítico: Os itens ${lowStockItems.map(i => `"${i.name}"`).join(', ')} estão acabando!</span>
+              </div>
+            </div>
+          ` : ''}
+
+          <!-- Dynamic Tabs Menu -->
           <nav class="flex bg-white p-1 rounded-xl border border-amber-200 mb-4 shadow-xs gap-1">
             ${state.operatorRole === 'CAIXA' ? `
               <button
                 onclick="setActiveTab('vender_fichas')"
-                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                class="flex-1 flex items-center justify-center gap-1 py-2 text-xs font-bold rounded-lg transition-all ${
                   state.activeTab === 'vender_fichas' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
                 }"
               >
@@ -687,40 +666,40 @@
             ${state.operatorRole === 'BARRACA' ? `
               <button
                 onclick="setActiveTab('entregar_produtos')"
-                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                class="flex-1 flex items-center justify-center gap-1 py-2 text-xs font-bold rounded-lg transition-all ${
                   state.activeTab === 'entregar_produtos' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
                 }"
               >
                 <i data-lucide="truck" class="w-3.5 h-3.5"></i>
-                <span>Entregar Itens (Baixas)</span>
+                <span>Entregar Itens</span>
               </button>
             ` : ''}
 
             ${state.operatorRole === 'ADMIN' ? `
               <button
                 onclick="setActiveTab('painel')"
-                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                class="flex-1 flex items-center justify-center gap-1 py-2 text-xs font-bold rounded-lg transition-all ${
                   state.activeTab === 'painel' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
                 }"
               >
                 <i data-lucide="trending-up" class="w-3.5 h-3.5"></i>
-                <span>Conciliação Geral</span>
+                <span>Balancete Geral</span>
               </button>
               
               <button
                 onclick="setActiveTab('gerenciar')"
-                class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+                class="flex-1 flex items-center justify-center gap-1 py-2 text-xs font-bold rounded-lg transition-all ${
                   state.activeTab === 'gerenciar' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
                 }"
               >
                 <i data-lucide="settings" class="w-3.5 h-3.5"></i>
-                <span>Gerenciar Produtos</span>
+                <span>Cardápio</span>
               </button>
             ` : ''}
 
             <button
               onclick="setActiveTab('historico_geral')"
-              class="flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-bold rounded-lg transition-all ${
+              class="flex-1 flex items-center justify-center gap-1 py-2 text-xs font-bold rounded-lg transition-all ${
                 state.activeTab === 'historico_geral' ? 'bg-orange-500 text-white shadow-xs' : 'text-slate-600 hover:bg-amber-50'
               }"
             >
@@ -729,26 +708,26 @@
             </button>
           </nav>
 
+          <!-- TAB: VENDER FICHAS (CAIXA) -->
           ${state.activeTab === 'vender_fichas' ? `
             <div class="space-y-4">
               <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
                 <div class="text-center mb-4 border-b border-amber-100 pb-3">
                   <span class="text-xs bg-emerald-100 text-emerald-800 font-extrabold px-3 py-1 rounded-full uppercase">
-                    Terminal de Vendas Ativo 💰
+                    Painel do Caixa 💵
                   </span>
-                  <h3 class="text-lg font-black text-slate-800 mt-2">Venda de Fichas do Caixa</h3>
-                  <p class="text-xs text-slate-500">As fichas são unificadas para dar flexibilidade ao cliente de escolher o produto na barraca!</p>
+                  <h3 class="text-base font-black text-slate-800 mt-2">Venda de Fichas Rápidas</h3>
+                  <p class="text-[11px] text-slate-500">As fichas dão liberdade para o cliente escolher o produto que quiser na barraca.</p>
                 </div>
 
-                <!-- Forma de Pagamento -->
-                <div class="mb-5 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                  <label class="block text-xs font-black text-slate-500 uppercase text-center mb-2">Forma de Pagamento:</label>
-                  <div class="grid grid-cols-3 gap-2">
+                <div class="mb-4 bg-slate-50 p-2.5 rounded-xl border border-slate-200">
+                  <label class="block text-[10px] font-black text-slate-500 uppercase text-center mb-1.5">Forma de Pagamento:</label>
+                  <div class="grid grid-cols-3 gap-1.5">
                     ${['Dinheiro', 'PIX', 'Cartão'].map(method => `
                       <button
                         type="button"
                         onclick="setPaymentMethod('${method}')"
-                        class="py-2 px-3 rounded-lg font-bold text-xs border-2 text-center transition ${
+                        class="py-1.5 rounded-lg font-bold text-xs border text-center transition ${
                           state.paymentMethod === method 
                             ? 'border-emerald-500 bg-emerald-50 text-emerald-800 font-black' 
                             : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-100'
@@ -760,145 +739,206 @@
                   </div>
                 </div>
 
-                <!-- Botões Rápidos de Venda -->
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <!-- Ficha de R$ 5,00 -->
-                  <div class="bg-amber-50/50 rounded-2xl p-4 border border-amber-200 flex flex-col justify-between">
+                <!-- Sell Action Cards -->
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <!-- Comum R$ 5,00 -->
+                  <div class="bg-amber-50/50 rounded-xl p-3 border border-amber-200 flex flex-col justify-between">
                     <div class="text-center">
-                      <span class="bg-amber-100 text-amber-800 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase">Valor Padrão</span>
-                      <h4 class="text-xl font-black text-slate-800 mt-1">Ficha Comum</h4>
-                      <p class="text-2xl font-black text-orange-600 my-2">R$ 5,00</p>
-                      <p class="text-[10px] text-slate-500">Troque por: Salsichão, Pastel, Canjica, Pipoca ou Refrigerante.</p>
+                      <span class="bg-amber-100 text-amber-800 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase">Ficha Padrão</span>
+                      <h4 class="font-extrabold text-slate-800 text-sm mt-1">Ficha Comum</h4>
+                      <p class="text-xl font-black text-orange-600 my-1">R$ 5,00</p>
+                      <p class="text-[9px] text-slate-400">Pastel, Pipoca, Salsichão, Canjica, Doces ou Refrigerante.</p>
                     </div>
-                    <div class="mt-4 flex gap-1">
+                    <div class="mt-3 grid grid-cols-5 gap-1">
                       ${[1, 2, 3, 5, 10].map(n => `
-                        <button onclick="handleSellTokens('Comum', ${n})" class="flex-1 bg-white hover:bg-amber-100 text-slate-800 border border-amber-300 py-2 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
+                        <button onclick="handleSellTokens('Comum', ${n})" class="bg-white hover:bg-amber-100 text-slate-800 border border-amber-300 py-1.5 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
                       `).join('')}
                     </div>
                   </div>
 
-                  <!-- Ficha de R$ 7,50 -->
-                  <div class="bg-red-50/40 rounded-2xl p-4 border border-red-200 flex flex-col justify-between">
+                  <!-- Especial R$ 7,50 -->
+                  <div class="bg-red-50/40 rounded-xl p-3 border border-red-200 flex flex-col justify-between">
                     <div class="text-center">
-                      <span class="bg-red-100 text-red-800 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase">Valor Especial</span>
-                      <h4 class="text-xl font-black text-slate-800 mt-1">Ficha Especial</h4>
-                      <p class="text-2xl font-black text-red-600 my-2">R$ 7,50</p>
-                      <p class="text-[10px] text-slate-500">Troque por: Água com Gás ou outros itens especiais.</p>
+                      <span class="bg-red-100 text-red-800 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase">Ficha Especial</span>
+                      <h4 class="font-extrabold text-slate-800 text-sm mt-1">Ficha Especial</h4>
+                      <p class="text-xl font-black text-red-600 my-1">R$ 7,50</p>
+                      <p class="text-[9px] text-slate-400">Recomendado para Água com Gás e Bebidas Especiais.</p>
                     </div>
-                    <div class="mt-4 flex gap-1">
+                    <div class="mt-3 grid grid-cols-5 gap-1">
                       ${[1, 2, 3, 5, 10].map(n => `
-                        <button onclick="handleSellTokens('Especial', ${n})" class="flex-1 bg-white hover:bg-red-100 text-slate-800 border border-red-300 py-2 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
+                        <button onclick="handleSellTokens('Especial', ${n})" class="bg-white hover:bg-red-100 text-slate-800 border border-red-300 py-1.5 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
                       `).join('')}
                     </div>
                   </div>
                 </div>
               </div>
 
-              <!-- Relatório Caixa -->
-              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                <h4 class="text-sm font-black text-slate-800 mb-2">Resumo Financeiro do Caixa</h4>
+              <!-- Caixa Resume Report -->
+              <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs">
+                <h4 class="text-xs font-black text-slate-800 mb-2">Entradas Registradas</h4>
                 <div class="grid grid-cols-3 gap-2 text-center text-xs">
-                  <div class="bg-slate-50 p-2 rounded-lg"><p class="text-slate-400 font-bold">💵 Dinheiro</p><p class="text-base font-black text-slate-800">R$ ${totalPaymentDinheiro.toFixed(2)}</p></div>
-                  <div class="bg-slate-50 p-2 rounded-lg"><p class="text-slate-400 font-bold">⚡ PIX</p><p class="text-base font-black text-slate-800">R$ ${totalPaymentPIX.toFixed(2)}</p></div>
-                  <div class="bg-slate-50 p-2 rounded-lg"><p class="text-slate-400 font-bold">💳 Cartão</p><p class="text-base font-black text-slate-800">R$ ${totalPaymentCartao.toFixed(2)}</p></div>
+                  <div class="bg-slate-50 p-2 rounded-lg">
+                    <p class="text-[10px] text-slate-400 font-bold">💵 Dinheiro</p>
+                    <p class="text-sm font-black text-slate-800">R$ ${totalPaymentDinheiro.toFixed(2)}</p>
+                  </div>
+                  <div class="bg-slate-50 p-2 rounded-lg">
+                    <p class="text-[10px] text-slate-400 font-bold">⚡ PIX</p>
+                    <p class="text-sm font-black text-slate-800">R$ ${totalPaymentPIX.toFixed(2)}</p>
+                  </div>
+                  <div class="bg-slate-50 p-2 rounded-lg">
+                    <p class="text-[10px] text-slate-400 font-bold">💳 Cartão</p>
+                    <p class="text-sm font-black text-slate-800">R$ ${totalPaymentCartao.toFixed(2)}</p>
+                  </div>
                 </div>
               </div>
             </div>
           ` : ''}
 
+          <!-- TAB: ENTREGAR ITENS (BARRACA) -->
           ${state.activeTab === 'entregar_produtos' ? `
-            <div class="space-y-4">
+            <div class="space-y-3">
               <div class="bg-white rounded-xl p-3 border border-amber-200 shadow-xs text-xs">
-                👋 <strong>Olá, ${state.sellerName}!</strong> Pegue a ficha física paga pelo cliente e registre a entrega dando baixa abaixo:
+                👋 <strong>Olá, ${state.sellerName}!</strong> Receba a ficha física do cliente e dê a baixa no item correspondente:
               </div>
 
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                ${state.items.map(item => {
-                  const isOutOfStock = item.stock <= 0;
-                  const isLowStock = item.stock > 0 && item.stock <= 5;
-                  const tokenColor = parseFloat(item.price) === 7.50 ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
-                  const labelFicha = parseFloat(item.price) === 7.50 ? 'Ficha Especial (R$ 7,50)' : 'Ficha Comum (R$ 5,00)';
+              ${state.items.length === 0 ? `
+                <div class="bg-white rounded-xl border p-6 text-center text-slate-400 text-xs">
+                  Nenhum produto cadastrado no cardápio de baixas.
+                </div>
+              ` : `
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  ${state.items.map(item => {
+                    const isOutOfStock = item.stock <= 0;
+                    const isLowStock = item.stock > 0 && item.stock <= 5;
+                    const tokenColor = parseFloat(item.price) === 7.50 ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800';
+                    const tokenLabel = parseFloat(item.price) === 7.50 ? 'Exige Ficha Especial' : 'Exige Ficha Comum';
 
-                  return `
-                    <div class="bg-white rounded-2xl border p-4 shadow-xs flex flex-col justify-between ${isOutOfStock ? 'border-red-300 bg-red-50/30 opacity-70' : 'border-amber-200'}">
-                      <div>
-                        <div class="flex justify-between items-start">
-                          <span class="text-[9px] font-extrabold px-2 py-0.5 rounded-md uppercase ${tokenColor}">${labelFicha}</span>
-                          <span class="text-xs font-bold text-slate-400">Estoque</span>
+                    return `
+                      <div class="bg-white rounded-xl border p-3 shadow-xs flex flex-col justify-between ${
+                        isOutOfStock ? 'opacity-60 border-red-200 bg-red-50/10' : 'border-amber-200'
+                      }">
+                        <div>
+                          <div class="flex justify-between items-start">
+                            <span class="text-[8px] font-bold px-1.5 py-0.5 rounded uppercase ${tokenColor}">${tokenLabel}</span>
+                            <span class="text-[10px] font-bold text-slate-400">Estoque</span>
+                          </div>
+                          <div class="flex justify-between items-center mt-1">
+                            <h3 class="font-bold text-slate-800 text-sm">${item.name}</h3>
+                            <span class="text-xs font-black px-2 py-0.5 rounded-full ${
+                              isOutOfStock 
+                                ? 'bg-red-100 text-red-700' 
+                                : isLowStock 
+                                  ? 'bg-orange-100 text-orange-700 animate-pulse' 
+                                  : 'bg-emerald-100 text-emerald-800'
+                            }">
+                              ${isOutOfStock ? 'Esgotado' : `${item.stock} un`}
+                            </span>
+                          </div>
                         </div>
-                        <div class="flex justify-between items-center mt-1">
-                          <h3 class="text-base font-black text-slate-800">${item.name}</h3>
-                          <span class="text-sm font-black ${isOutOfStock ? 'text-red-600' : isLowStock ? 'text-orange-500 animate-pulse' : 'text-emerald-600'}">
-                            ${isOutOfStock ? 'Esgotado! ❌' : `${item.stock} un`}
-                          </span>
+
+                        <div class="mt-3 pt-2.5 border-t border-slate-100 flex gap-2">
+                          <button
+                            onclick="handleDeliverProduct('${item.id}', 5)"
+                            ${isOutOfStock || item.stock < 5 ? 'disabled' : ''}
+                            class="px-2.5 py-2 text-xs font-bold rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-700 transition"
+                          >
+                            -5 un
+                          </button>
+                          <button
+                            onclick="handleDeliverProduct('${item.id}', 1)"
+                            ${isOutOfStock ? 'disabled' : ''}
+                            class="flex-1 py-2 text-xs font-black rounded-lg text-white bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 transition"
+                          >
+                            Entregar / Baixar (-1)
+                          </button>
                         </div>
                       </div>
-
-                      <div class="mt-4 pt-3 border-t border-slate-100 flex gap-2">
-                        <button
-                          onclick="handleDeliverProduct('${item.id}', 5)"
-                          ${isOutOfStock || item.stock < 5 ? 'disabled' : ''}
-                          class="px-2.5 py-2.5 text-xs font-bold rounded-lg border border-amber-200 bg-amber-50 hover:bg-amber-100 text-amber-700 transition ${isOutOfStock || item.stock < 5 ? 'opacity-50 cursor-not-allowed' : ''}"
-                        >
-                          -5 un
-                        </button>
-                        <button
-                          onclick="handleDeliverProduct('${item.id}', 1)"
-                          ${isOutOfStock ? 'disabled' : ''}
-                          class="flex-1 py-2.5 text-xs font-black rounded-lg text-white bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 transition ${isOutOfStock ? 'opacity-50 cursor-not-allowed' : ''}"
-                        >
-                          Entregar e Dar Baixa (-1)
-                        </button>
-                      </div>
-                    </div>
-                  `;
-                }).join('')}
-              </div>
+                    `;
+                  }).join('')}
+                </div>
+              `}
             </div>
           ` : ''}
 
+          <!-- TAB: BALANCETE GERAL (ADMIN) -->
           ${state.activeTab === 'painel' ? `
             <div class="space-y-4">
-              <!-- Quadro Comparativo de Auditoria -->
-              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                <h3 class="font-extrabold text-slate-800 text-base mb-1">Auditoria de Vendas vs. Entregas Físicas</h3>
-                <p class="text-xs text-slate-500">Compare quantas fichas de cada valor foram vendidas pelo caixa com as baixas que as barracas deram.</p>
+              <!-- Sincronização entre Dispositivos Offline -->
+              <div class="bg-white rounded-2xl border-2 border-dashed border-orange-500 p-4 shadow-sm text-xs">
+                <h3 class="font-extrabold text-orange-700 text-sm mb-1.5 flex items-center gap-1.5">
+                  <i data-lucide="arrow-right-left" class="w-4 h-4"></i>
+                  Sincronizar Celulares (WhatsApp)
+                </h3>
+                <p class="text-slate-500 mb-3 text-[11px]">
+                  Como estamos rodando offline sem Firebase, você pode copiar os dados deste celular e enviar no WhatsApp dos outros colaboradores para manter o estoque igualado na hora!
+                </p>
 
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 pt-3 border-t border-slate-100">
-                  <div class="bg-amber-50/40 p-4 rounded-xl border border-amber-200">
-                    <h4 class="font-extrabold text-slate-800 text-sm mb-2">Fichas de R$ 5,00 (Comum)</h4>
-                    <div class="space-y-1.5 text-xs">
-                      <div class="flex justify-between"><span class="text-slate-500">Fichas Vendidas no Caixa:</span><span class="font-bold text-slate-800">${totalFichasComunsVendidas} un</span></div>
-                      <div class="flex justify-between"><span class="text-slate-500">Baixas dadas pelas Barracas:</span><span class="font-bold text-emerald-600">${totalFichasComunsEntregues} un</span></div>
-                      <div class="flex justify-between pt-1.5 border-t border-dashed border-amber-200 font-extrabold">
-                        <span class="text-slate-700">Fichas com Clientes (Em circulação):</span><span class="text-orange-600">${fichasComunsEmCirculacao} un</span>
+                <div class="flex flex-col sm:flex-row gap-2">
+                  <button
+                    onclick="handleExportData()"
+                    class="flex-1 bg-orange-600 hover:bg-orange-700 text-white font-extrabold py-2 px-3 rounded-xl transition flex items-center justify-center gap-1"
+                  >
+                    <i data-lucide="copy" class="w-4 h-4"></i>
+                    Gerar Código de Envio
+                  </button>
+                  
+                  <form onsubmit="handleImportData(event)" class="flex-1 flex gap-1">
+                    <input
+                      id="inputImportCode"
+                      type="text"
+                      placeholder="Cole o código recebido aqui..."
+                      class="flex-1 px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
+                      required
+                    />
+                    <button
+                      type="submit"
+                      class="bg-slate-800 hover:bg-slate-900 text-white font-bold py-1.5 px-3 rounded-lg text-xs"
+                    >
+                      Importar
+                    </button>
+                  </form>
+                </div>
+              </div>
+
+              <!-- Auditoria Comparativa de Fichas -->
+              <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs">
+                <h3 class="font-bold text-slate-800 text-xs mb-3">Auditoria de Caixa vs. Entregas Físicas</h3>
+                
+                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div class="bg-amber-50/40 p-3 rounded-lg border border-amber-200 text-xs">
+                    <h4 class="font-bold text-slate-800 text-xs mb-2">Fichas de R$ 5,00 (Comum)</h4>
+                    <div class="space-y-1">
+                      <div class="flex justify-between"><span>Vendidas no Caixa:</span><span class="font-bold">${totalFichasComunsVendidas} un</span></div>
+                      <div class="flex justify-between text-emerald-700"><span>Entregues nas Barracas:</span><span class="font-bold">${totalFichasComunsEntregues} un</span></div>
+                      <div class="flex justify-between font-bold pt-1.5 border-t border-dashed border-amber-200">
+                        <span>Em Circulação:</span><span class="text-orange-600">${fichasComunsEmCirculacao} un</span>
                       </div>
                     </div>
                   </div>
 
-                  <div class="bg-red-50/30 p-4 rounded-xl border border-red-200">
-                    <h4 class="font-extrabold text-slate-800 text-sm mb-2">Fichas de R$ 7,50 (Especial)</h4>
-                    <div class="space-y-1.5 text-xs">
-                      <div class="flex justify-between"><span class="text-slate-500">Fichas Vendidas no Caixa:</span><span class="font-bold text-slate-800">${totalFichasEspeciaisVendidas} un</span></div>
-                      <div class="flex justify-between"><span class="text-slate-500">Baixas dadas pelas Barracas:</span><span class="font-bold text-emerald-600">${totalFichasEspeciaisEntregues} un</span></div>
-                      <div class="flex justify-between pt-1.5 border-t border-dashed border-red-200 font-extrabold">
-                        <span class="text-slate-700">Fichas com Clientes (Em circulação):</span><span class="text-orange-600">${fichasEspeciaisEmCirculacao} un</span>
+                  <div class="bg-red-50/30 p-3 rounded-lg border border-red-200 text-xs">
+                    <h4 class="font-bold text-slate-800 text-xs mb-2">Fichas de R$ 7,50 (Especial)</h4>
+                    <div class="space-y-1">
+                      <div class="flex justify-between"><span>Vendidas no Caixa:</span><span class="font-bold">${totalFichasEspeciaisVendidas} un</span></div>
+                      <div class="flex justify-between text-emerald-700"><span>Entregues nas Barracas:</span><span class="font-bold">${totalFichasEspeciaisEntregues} un</span></div>
+                      <div class="flex justify-between font-bold pt-1.5 border-t border-dashed border-red-200">
+                        <span>Em Circulação:</span><span class="text-orange-600">${fichasEspeciaisEmCirculacao} un</span>
                       </div>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <!-- Estoque das Barracas -->
-              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                <h3 class="font-extrabold text-slate-800 text-sm mb-3">Estoque Geral de Produtos</h3>
+              <!-- Quadro de Estoque das Barracas -->
+              <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs">
+                <h3 class="font-bold text-slate-800 text-xs mb-2">Inventário Geral das Barracas</h3>
                 <div class="grid grid-cols-2 sm:grid-cols-3 gap-2">
                   ${state.items.map(i => `
-                    <div class="bg-slate-50 p-2.5 rounded-lg border border-slate-200 text-xs">
-                      <p class="font-black text-slate-800 truncate">${i.name}</p>
-                      <div class="flex justify-between items-center mt-1">
-                        <span class="text-[10px] text-slate-400">Restam:</span>
-                        <span class="font-black ${i.stock === 0 ? 'text-red-600' : 'text-slate-700'}">${i.stock} un</span>
+                    <div class="bg-slate-50 p-2 rounded border text-xs">
+                      <p class="font-bold text-slate-800 truncate">${i.name}</p>
+                      <div class="flex justify-between mt-1">
+                        <span class="text-slate-400 text-[10px]">Estoque:</span>
+                        <span class="font-bold ${i.stock === 0 ? 'text-red-600' : 'text-slate-700'}">${i.stock} un</span>
                       </div>
                     </div>
                   `).join('')}
@@ -907,66 +947,70 @@
             </div>
           ` : ''}
 
+          <!-- TAB: GERENCIAR CARDÁPIO (ADMIN) -->
           ${state.activeTab === 'gerenciar' ? `
             <div class="space-y-4">
-              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                <h3 class="font-extrabold text-slate-800 text-base mb-3">Cadastrar Novo Produto no Cardápio</h3>
-                <form onsubmit="handleAddNewItem(event)" class="grid grid-cols-1 md:grid-cols-4 gap-3">
-                  <div class="col-span-1 md:col-span-2">
-                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Nome do Produto</label>
-                    <input id="newItemName" type="text" placeholder="Ex: Canjica, Milho..." class="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-orange-500 text-sm font-semibold" required />
+              <!-- Cadastrar Produto -->
+              <div class="bg-white rounded-xl border border-amber-200 p-3.5 shadow-xs">
+                <h3 class="font-extrabold text-slate-800 text-sm mb-2.5">Adicionar Novo Produto</h3>
+                
+                <form onsubmit="handleAddNewItem(event)" class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                  <div>
+                    <label class="block text-[9px] uppercase font-bold text-slate-500 mb-0.5">Nome</label>
+                    <input id="newItemName" type="text" placeholder="Ex: Espetinho..." class="w-full px-2 py-1.5 border rounded-lg" required />
                   </div>
                   <div>
-                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Qual Ficha Exige?</label>
-                    <select id="newItemPrice" class="w-full px-3 py-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:border-orange-500 text-sm font-semibold">
+                    <label class="block text-[9px] uppercase font-bold text-slate-500 mb-0.5">Valor do Item</label>
+                    <select id="newItemPrice" class="w-full px-2 py-1.5 border rounded-lg bg-white font-bold">
                       <option value="5.00">R$ 5,00 (Ficha Comum)</option>
                       <option value="7.50">R$ 7,50 (Ficha Especial)</option>
                     </select>
                   </div>
                   <div>
-                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Estoque Físico</label>
-                    <input id="newItemStock" type="number" placeholder="Quantidade" class="w-full px-3 py-2 border border-slate-200 rounded-xl focus:outline-none focus:border-orange-500 text-sm font-semibold" required />
+                    <label class="block text-[9px] uppercase font-bold text-slate-500 mb-0.5">Estoque Inicial</label>
+                    <input id="newItemStock" type="number" placeholder="Quantidade" class="w-full px-2 py-1.5 border rounded-lg" required />
                   </div>
-                  <div class="col-span-1 md:col-span-2">
-                    <label class="block text-[10px] uppercase font-black text-slate-500 mb-1">Categoria</label>
-                    <select id="newItemCategory" class="w-full px-3 py-2 border border-slate-200 rounded-xl bg-white focus:outline-none focus:border-orange-500 text-sm font-semibold">
+                  <div>
+                    <label class="block text-[9px] uppercase font-bold text-slate-500 mb-0.5">Categoria</label>
+                    <select id="newItemCategory" class="w-full px-2 py-1.5 border rounded-lg bg-white">
                       <option value="Comida">🌽 Comida</option>
                       <option value="Bebida">🍹 Bebida</option>
-                      <option value="Outros">🎁 Outros</option>
+                      <option value="Brincadeira">🎯 Brincadeira</option>
                     </select>
                   </div>
-                  <div class="col-span-1 md:col-span-4 pt-1">
-                    <button type="submit" class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2.5 px-4 rounded-xl shadow transition">Salvar Produto ✔️</button>
+                  <div class="sm:col-span-2 pt-1.5">
+                    <button type="submit" class="w-full bg-orange-500 hover:bg-orange-600 text-white font-bold py-2 rounded-lg transition">Salvar no Cardápio</button>
                   </div>
                 </form>
               </div>
 
-              <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-                <h3 class="font-extrabold text-slate-800 text-base mb-2">Ajustar Estoques Rapidamente</h3>
-                <div class="overflow-x-auto">
-                  <table class="w-full text-left text-xs md:text-sm">
+              <!-- Lista de Edição Rápida de Estoque -->
+              <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs">
+                <h3 class="font-bold text-slate-800 text-xs mb-2">Ajustar Estoque de Produtos</h3>
+                <div class="overflow-x-auto text-xs">
+                  <table class="w-full text-left">
                     <thead>
-                      <tr class="border-b border-slate-100 text-slate-400 uppercase text-[9px] font-bold">
-                        <th class="py-2">Item</th>
-                        <th class="py-2 text-right">Ficha</th>
-                        <th class="py-2 text-center w-36">Estoque</th>
-                        <th class="py-2 text-center w-12">Remover</th>
+                      <tr class="border-b text-slate-400 text-[9px] font-bold">
+                        <th class="py-1">Nome</th>
+                        <th class="py-1 text-right">Valor</th>
+                        <th class="py-1 text-center w-32">Estoque</th>
+                        <th class="py-1 text-center w-12">Remover</th>
                       </tr>
                     </thead>
-                    <tbody class="divide-y divide-slate-100">
+                    <tbody>
                       ${state.items.map(item => `
-                        <tr>
-                          <td class="py-3 font-bold text-slate-800">${item.name}</td>
-                          <td class="py-3 text-right font-bold text-slate-600">R$ ${parseFloat(item.price).toFixed(2)}</td>
-                          <td class="py-3">
-                            <div class="flex items-center justify-center gap-1.5">
-                              <button type="button" onclick="handleUpdateStockDirectly('${item.id}', ${Math.max(0, item.stock - 1)}, '${item.name}')" class="h-6 w-6 bg-slate-100 rounded-lg hover:bg-slate-200 font-bold">-</button>
-                              <input type="number" value="${item.stock}" onchange="handleUpdateStockDirectly('${item.id}', this.value, '${item.name}')" class="w-12 text-center border rounded font-bold" />
-                              <button type="button" onclick="handleUpdateStockDirectly('${item.id}', ${item.stock + 1}, '${item.name}')" class="h-6 w-6 bg-slate-100 rounded-lg hover:bg-slate-200 font-bold">+</button>
+                        <tr class="border-b hover:bg-slate-50">
+                          <td class="py-2.5 font-bold">${item.name}</td>
+                          <td class="py-2.5 text-right font-semibold">R$ ${parseFloat(item.price).toFixed(2)}</td>
+                          <td class="py-2.5 text-center">
+                            <div class="flex items-center justify-center gap-1">
+                              <button onclick="handleUpdateStockDirectly('${item.id}', ${Math.max(0, item.stock - 1)}, '${item.name}')" class="h-6 w-6 bg-slate-100 rounded hover:bg-slate-200 font-bold">-</button>
+                              <input type="number" value="${item.stock}" onchange="handleUpdateStockDirectly('${item.id}', this.value, '${item.name}')" class="w-10 text-center border rounded py-0.5" />
+                              <button onclick="handleUpdateStockDirectly('${item.id}', ${item.stock + 1}, '${item.name}')" class="h-6 w-6 bg-slate-100 rounded hover:bg-slate-200 font-bold">+</button>
                             </div>
                           </td>
-                          <td class="py-3 text-center">
-                            <button type="button" onclick="handleDeleteItem('${item.id}', '${item.name}')" class="text-slate-400 hover:text-red-600">Remover</button>
+                          <td class="py-2.5 text-center">
+                            <button onclick="handleDeleteItem('${item.id}', '${item.name}')" class="text-red-500 hover:underline">Excluir</button>
                           </td>
                         </tr>
                       `).join('')}
@@ -977,35 +1021,33 @@
             </div>
           ` : ''}
 
+          <!-- TAB: ATIVIDADES / LOGS -->
           ${state.activeTab === 'historico_geral' ? `
-            <div class="bg-white rounded-2xl border border-amber-200 p-4 shadow-xs">
-              <h3 class="font-extrabold text-slate-800 text-base mb-1">Linha do Tempo das Atividades</h3>
-              <p class="text-xs text-slate-500 mb-4">Veja tudo o que foi vendido ou entregue nas fogueiras e caixas:</p>
+            <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs text-xs">
+              <h3 class="font-bold text-slate-800 text-xs mb-1">Histórico Local de Atividades</h3>
+              <p class="text-[10px] text-slate-500 mb-3">Veja o que foi registrado neste aparelho:</p>
 
               ${state.transactions.length === 0 ? `
-                <p class="text-center py-8 text-slate-400 text-xs">Nenhuma atividade registrada ainda.</p>
+                <p class="text-center py-6 text-slate-400">Nenhuma venda ou baixa registrada ainda.</p>
               ` : `
-                <div class="divide-y divide-slate-100 max-h-[60vh] overflow-y-auto pr-1">
-                  ${state.transactions.slice(0, 50).map(trans => {
-                    const isSale = trans.type === 'VENDA_FICHA';
-                    const timeString = trans.timestamp?.seconds 
-                      ? new Date(trans.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+                <div class="divide-y max-h-[50vh] overflow-y-auto pr-1">
+                  ${state.transactions.slice(0, 50).map(tx => {
+                    const isSale = tx.type === 'VENDA_FICHA';
+                    const timeString = tx.timestamp 
+                      ? new Date(tx.timestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
                       : 'Agora';
 
                     return `
-                      <div class="py-3 flex items-center justify-between text-xs md:text-sm">
-                        <div class="flex items-start gap-2">
-                          <span class="text-lg">${isSale ? '🎟️' : '🍿'}</span>
-                          <div>
-                            <p class="font-bold text-slate-800">
-                              ${isSale ? `Vendido: ${trans.qty}x Ficha ${trans.tokenType}` : `Baixa: ${trans.qty}x ${trans.itemName}`}
-                            </p>
-                            <p class="text-[10px] text-slate-400">
-                              Por: ${trans.sellerName || 'Colaborador'} • ${timeString}
-                            </p>
-                          </div>
+                      <div class="py-2 flex justify-between items-center text-[11px]">
+                        <div>
+                          <p class="font-bold text-slate-800">
+                            ${isSale ? `🎟️ Venda: ${tx.qty}x Ficha ${tx.tokenType}` : `🍿 Baixa: ${tx.qty}x ${tx.itemName}`}
+                          </p>
+                          <p class="text-[9px] text-slate-400">
+                            Registrado por: ${tx.sellerName} • ${timeString}
+                          </p>
                         </div>
-                        <span class="font-bold text-slate-700">R$ ${(trans.total || 0).toFixed(2)}</span>
+                        <span class="font-bold">R$ ${tx.total.toFixed(2)}</span>
                       </div>
                     `;
                   }).join('')}
@@ -1017,18 +1059,23 @@
         </main>
 
         <!-- Footer -->
-        <footer class="text-center py-8 text-[11px] text-slate-400 border-t border-amber-100 mt-6 max-w-4xl mx-auto px-4">
+        <footer class="text-center py-6 text-[10px] text-slate-400 border-t border-amber-100 mt-6 max-w-4xl mx-auto px-4">
           <p class="font-bold text-slate-500">🌽 Olha a Fila! É verdade! 🌽</p>
-          <p class="mt-1">Sistema pronto e otimizado para celulares.</p>
+          <p class="mt-1">Sistema simples, veloz e sem travas na fogueira.</p>
         </footer>
       `;
 
+      // Recria ícones
       if (window.lucide) {
         window.lucide.createIcons();
       }
     }
 
-    render();
+    // Inicialização do carregamento offline
+    window.onload = function() {
+      loadLocalData();
+      render();
+    };
   </script>
 </body>
 </html>
