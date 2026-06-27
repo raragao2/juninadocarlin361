@@ -36,22 +36,50 @@
 </head>
 <body class="min-h-screen bg-orange-50 text-slate-800 font-sans pb-16">
 
-  <!-- APP CONTAINER (rendered dynamically by JavaScript) -->
+  <!-- APP CONTAINER -->
   <div id="app">
     <!-- Splash screen / Loading Inicial -->
     <div class="flex flex-col items-center justify-center min-h-screen bg-orange-50 p-4">
       <div class="text-center">
         <span class="text-6xl animate-bounce block mb-4">🔥</span>
         <h2 class="text-2xl font-black text-orange-600">Preparando o Arraial...</h2>
-        <p class="text-sm text-slate-500 mt-2">Carregando as barracas e fogueiras locais.</p>
+        <p class="text-sm text-slate-500 mt-2">Carregando as barracas e fogueiras em tempo real.</p>
       </div>
     </div>
   </div>
 
-  <!-- APPLICATION LOGIC (100% Offline & Sincronizável por Código) -->
-  <script>
-    // ESTADO GLOBAL DO APLICATIVO (Salvo 100% no LocalStorage)
+  <!-- APPLICATION LOGIC -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+    import { getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+
+    // Tenta carregar as credenciais do Firebase salvas localmente
+    let savedConfig = null;
+    try {
+      const localConfig = localStorage.getItem('junina_firebase_config');
+      if (localConfig) {
+        savedConfig = JSON.parse(localConfig);
+      }
+    } catch(e) {
+      console.error("Erro ao ler credenciais salvas:", e);
+    }
+
+    // Cole suas credenciais aqui se preferir deixar fixo no código:
+    const hardcodedConfig = {
+      apiKey: "",
+      authDomain: "",
+      projectId: "",
+      storageBucket: "",
+      messagingSenderId: "",
+      appId: ""
+    };
+
+    const firebaseConfig = savedConfig || hardcodedConfig;
+
     const state = {
+      dbConnected: false,
+      isSyncing: false,
       operatorRole: localStorage.getItem('junina_role') || 'BARRACA',
       sellerName: localStorage.getItem('junina_seller_name') || '',
       isSettingName: !localStorage.getItem('junina_seller_name'),
@@ -59,14 +87,15 @@
       tempRole: localStorage.getItem('junina_role') || 'BARRACA',
       items: [],
       transactions: [],
-      activeTab: localStorage.getItem('junina_role') === 'CAIXA' ? 'vender_fichas' : 'entregar_produtos',
+      activeTab: 'vender_fichas',
       alertMessage: null,
       confirmDeleteData: null,
       paymentMethod: 'Dinheiro',
-      importCode: ''
+      showConfigModal: false,
+      appId: 'arraial-principal'
     };
 
-    // Dados de demonstração para inicializar a festa bonita na primeira abertura
+    // Itens padrão caso o banco de dados esteja vazio
     const defaultItems = [
       { id: "1", name: "Salsichão", price: 5.00, stock: 50, category: "Comida" },
       { id: "2", name: "Pastel", price: 5.00, stock: 40, category: "Comida" },
@@ -75,42 +104,103 @@
       { id: "5", name: "Água com Gás", price: 7.50, stock: 30, category: "Bebida" }
     ];
 
-    // Carregamento inicial seguro
-    function loadLocalData() {
-      try {
-        const localItems = localStorage.getItem('local_items');
-        if (!localItems) {
-          localStorage.setItem('local_items', JSON.stringify(defaultItems));
-          state.items = defaultItems;
-        } else {
-          state.items = JSON.parse(localItems);
-        }
+    let db = null;
+    let auth = null;
 
-        const localTx = localStorage.getItem('local_transactions');
-        if (!localTx) {
-          localStorage.setItem('local_transactions', JSON.stringify([]));
-          state.transactions = [];
+    // Função para tentar conectar ao Firebase sem quebrar a página caso falte dados
+    async function tryConnectFirebase() {
+      if (!firebaseConfig.apiKey) {
+        console.log("Firebase não configurado. Rodando em Modo de Demonstração Local.");
+        loadLocalFallbackData();
+        state.dbConnected = false;
+        render();
+        return;
+      }
+
+      try {
+        state.isSyncing = true;
+        render();
+
+        const app = initializeApp(firebaseConfig);
+        auth = getAuth(app);
+        db = getFirestore(app);
+
+        await signInAnonymously(auth);
+        
+        state.dbConnected = true;
+        startRealtimeSync();
+      } catch (err) {
+        console.error("Erro ao conectar no Firebase:", err);
+        showAlert("Falha na conexão simultânea. Rodando local por enquanto.", "warning");
+        state.dbConnected = false;
+        loadLocalFallbackData();
+        render();
+      }
+    }
+
+    // Escuta alterações do banco em tempo real
+    function startRealtimeSync() {
+      const itemsCollection = collection(db, 'artifacts', state.appId, 'public', 'data', 'items');
+      const transactionsCollection = collection(db, 'artifacts', state.appId, 'public', 'data', 'transactions');
+
+      // Escutar produtos
+      onSnapshot(itemsCollection, (snapshot) => {
+        const list = [];
+        snapshot.forEach((doc) => {
+          list.push({ id: doc.id, ...doc.data() });
+        });
+
+        // Se o banco estiver zerado no primeiro uso, inicializa com os produtos padrão
+        if (list.length === 0) {
+          defaultItems.forEach(async (item) => {
+            await setDoc(doc(itemsCollection, item.id), item);
+          });
         } else {
-          state.transactions = JSON.parse(localTx);
+          list.sort((a, b) => a.name.localeCompare(b.name));
+          state.items = list;
+          state.isSyncing = false;
+          render();
         }
-      } catch (e) {
-        console.error("Erro ao carregar dados locais, reiniciando padrões:", e);
+      });
+
+      // Escutar transações de vendas
+      onSnapshot(transactionsCollection, (snapshot) => {
+        const list = [];
+        snapshot.forEach((doc) => {
+          list.push({ id: doc.id, ...doc.data() });
+        });
+        list.sort((a, b) => {
+          const timeA = a.timestamp?.seconds || 0;
+          const timeB = b.timestamp?.seconds || 0;
+          return timeB - timeA;
+        });
+        state.transactions = list;
+        render();
+      });
+    }
+
+    // Carregamento de salvaguarda local caso não use Firebase ainda
+    function loadLocalFallbackData() {
+      try {
+        const localItems = localStorage.getItem('junina_local_items');
+        state.items = localItems ? JSON.parse(localItems) : defaultItems;
+        const localTx = localStorage.getItem('junina_local_tx');
+        state.transactions = localTx ? JSON.parse(localTx) : [];
+      } catch(e) {
         state.items = defaultItems;
         state.transactions = [];
       }
+      state.isSyncing = false;
     }
 
-    // Salva o estado atual no armazenamento local
-    function saveLocalData() {
-      try {
-        localStorage.setItem('local_items', JSON.stringify(state.items));
-        localStorage.setItem('local_transactions', JSON.stringify(state.transactions));
-      } catch (e) {
-        console.error("Falha ao salvar dados localmente:", e);
+    function saveLocalFallbackData() {
+      if (!state.dbConnected) {
+        localStorage.setItem('junina_local_items', JSON.stringify(state.items));
+        localStorage.setItem('junina_local_tx', JSON.stringify(state.transactions));
       }
     }
 
-    // Alertas customizados sem usar alert()
+    // Alertas personalizados
     window.showAlert = function(text, type = 'info') {
       state.alertMessage = { text, type };
       render();
@@ -120,7 +210,6 @@
       }, 4000);
     };
 
-    // Navegação de abas
     window.setActiveTab = function(tab) {
       state.activeTab = tab;
       render();
@@ -143,7 +232,7 @@
       render();
     };
 
-    // Salva a identificação do colaborador
+    // Identificação de usuário
     window.handleSaveOperator = function(e) {
       if (e) e.preventDefault();
       const inputName = document.getElementById('inputSellerName').value.trim();
@@ -171,8 +260,8 @@
       render();
     };
 
-    // Venda de fichas de R$ 5,00 ou R$ 7,50
-    window.handleSellTokens = function(type, qty) {
+    // Venda de fichas
+    window.handleSellTokens = async function(type, qty) {
       if (!state.sellerName) {
         state.isSettingName = true;
         render();
@@ -197,17 +286,30 @@
         total: totalValue,
         paymentMethod: state.paymentMethod,
         sellerName: state.sellerName,
-        timestamp: Math.floor(Date.now() / 1000)
+        timestamp: state.dbConnected ? null : Math.floor(Date.now() / 1000)
       };
 
-      state.transactions.unshift(newTx);
-      saveLocalData();
-      render();
+      if (state.dbConnected) {
+        try {
+          const transColRef = collection(db, 'artifacts', state.appId, 'public', 'data', 'transactions');
+          await addDoc(transColRef, {
+            ...newTx,
+            timestamp: serverTimestamp()
+          });
+        } catch(e) {
+          window.showAlert("Erro ao registrar no banco.", "error");
+        }
+      } else {
+        state.transactions.unshift(newTx);
+        saveLocalFallbackData();
+        render();
+      }
+
       window.showAlert(`🎟️ Vendido: ${q}x Ficha ${type} (R$ ${totalValue.toFixed(2)})!`, "success");
     };
 
-    // Entrega física do produto com baixa no estoque
-    window.handleDeliverProduct = function(itemId, qtyToDeliver) {
+    // Entrega de produto física com baixa
+    window.handleDeliverProduct = async function(itemId, qtyToDeliver) {
       if (!state.sellerName) {
         state.isSettingName = true;
         render();
@@ -231,10 +333,6 @@
 
       const tokenTypeNeeded = parseFloat(item.price) === 7.50 ? 'Especial' : 'Comum';
 
-      // Atualiza estoque localmente
-      item.stock -= qtyToDeliver;
-
-      // Adiciona transação de baixa
       const newTx = {
         id: crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 9),
         type: 'ENTREGA_PRODUTO',
@@ -245,17 +343,37 @@
         price: parseFloat(item.price),
         total: parseFloat(item.price) * qtyToDeliver,
         sellerName: state.sellerName,
-        timestamp: Math.floor(Date.now() / 1000)
+        timestamp: state.dbConnected ? null : Math.floor(Date.now() / 1000)
       };
 
-      state.transactions.unshift(newTx);
-      saveLocalData();
-      render();
+      if (state.dbConnected) {
+        try {
+          const itemDocRef = doc(db, 'artifacts', state.appId, 'public', 'data', 'items', item.id);
+          const transColRef = collection(db, 'artifacts', state.appId, 'public', 'data', 'transactions');
+
+          await updateDoc(itemDocRef, {
+            stock: increment(-qtyToDeliver)
+          });
+
+          await addDoc(transColRef, {
+            ...newTx,
+            timestamp: serverTimestamp()
+          });
+        } catch(e) {
+          window.showAlert("Erro ao dar baixa no servidor.", "error");
+        }
+      } else {
+        item.stock -= qtyToDeliver;
+        state.transactions.unshift(newTx);
+        saveLocalFallbackData();
+        render();
+      }
+
       window.showAlert(`✅ Entrega feita! Baixa de ${qtyToDeliver}x "${item.name}" registrada.`, "success");
     };
 
-    // Adicionar um novo item ao cardápio de vendas
-    window.handleAddNewItem = function(e) {
+    // Adicionar novo produto
+    window.handleAddNewItem = async function(e) {
       if (e) e.preventDefault();
       const name = document.getElementById('newItemName').value.trim();
       const price = parseFloat(document.getElementById('newItemPrice').value);
@@ -275,32 +393,51 @@
         category
       };
 
-      state.items.push(newItem);
-      state.items.sort((a, b) => a.name.localeCompare(b.name));
-      saveLocalData();
-      render();
+      if (state.dbConnected) {
+        try {
+          const itemsColRef = collection(db, 'artifacts', state.appId, 'public', 'data', 'items');
+          await setDoc(doc(itemsColRef, newItem.id), {
+            ...newItem,
+            createdAt: serverTimestamp()
+          });
+        } catch(e) {
+          window.showAlert("Erro ao salvar produto no banco.", "error");
+        }
+      } else {
+        state.items.push(newItem);
+        state.items.sort((a, b) => a.name.localeCompare(b.name));
+        saveLocalFallbackData();
+        render();
+      }
+
       window.showAlert(`🎉 "${name}" inserido com sucesso!`, "success");
-      
-      // Limpa formulário
       document.getElementById('newItemName').value = '';
       document.getElementById('newItemStock').value = '';
     };
 
-    // Ajusta o estoque diretamente na tabela de produtos
-    window.handleUpdateStockDirectly = function(itemId, newStockValue, itemName) {
+    // Ajuste direto de estoque
+    window.handleUpdateStockDirectly = async function(itemId, newStockValue, itemName) {
       const val = parseInt(newStockValue);
       if (isNaN(val) || val < 0) return;
 
-      const item = state.items.find(i => i.id === itemId);
-      if (item) {
-        item.stock = val;
-        saveLocalData();
-        render();
-        window.showAlert(`Estoque de "${itemName}" ajustado para ${val}.`, "info");
+      if (state.dbConnected) {
+        try {
+          const itemDocRef = doc(db, 'artifacts', state.appId, 'public', 'data', 'items', itemId);
+          await updateDoc(itemDocRef, { stock: val });
+        } catch(e) {
+          window.showAlert("Erro ao atualizar no banco.", "error");
+        }
+      } else {
+        const item = state.items.find(i => i.id === itemId);
+        if (item) {
+          item.stock = val;
+          saveLocalFallbackData();
+          render();
+        }
       }
+      window.showAlert(`Estoque de "${itemName}" ajustado para ${val}.`, "info");
     };
 
-    // Modal de confirmação de exclusão
     window.handleDeleteItem = function(itemId, itemName) {
       state.confirmDeleteData = { id: itemId, name: itemName };
       render();
@@ -311,68 +448,64 @@
       render();
     };
 
-    window.executeDeleteItem = function() {
+    window.executeDeleteItem = async function() {
       if (!state.confirmDeleteData) return;
-      state.items = state.items.filter(i => i.id !== state.confirmDeleteData.id);
-      saveLocalData();
+
+      if (state.dbConnected) {
+        try {
+          const itemDocRef = doc(db, 'artifacts', state.appId, 'public', 'data', 'items', state.confirmDeleteData.id);
+          await deleteDoc(itemDocRef);
+        } catch(e) {
+          window.showAlert("Erro ao deletar do banco.", "error");
+        }
+      } else {
+        state.items = state.items.filter(i => i.id !== state.confirmDeleteData.id);
+        saveLocalFallbackData();
+      }
+
       window.showAlert(`🗑️ "${state.confirmDeleteData.name}" removido do cardápio.`, "info");
       state.confirmDeleteData = null;
       render();
     };
 
-    // Gera uma string compactada contendo todo o estoque e histórico de vendas atual do telefone
-    window.handleExportData = function() {
-      const exportObject = {
-        items: state.items,
-        transactions: state.transactions
-      };
-      
-      // Converte para base64 compactado seguro
-      const payload = btoa(unescape(encodeURIComponent(JSON.stringify(exportObject))));
-      
-      // Copiar para área de transferência via fallback robusto para celular
-      const tempInput = document.createElement('textarea');
-      tempInput.value = payload;
-      document.body.appendChild(tempInput);
-      tempInput.select();
-      document.execCommand('copy');
-      document.body.removeChild(tempInput);
-
-      window.showAlert("📋 Código copiado! Envie no WhatsApp dos outros 3 celulares.", "success");
-    };
-
-    // Importa o estoque e histórico enviado por outro operador
-    window.handleImportData = function(e) {
+    // Salvar credenciais recebidas na tela
+    window.saveFirebaseCredentials = function(e) {
       if (e) e.preventDefault();
-      const code = document.getElementById('inputImportCode').value.trim();
-      if (!code) {
-        window.showAlert("Cole o código recebido antes de confirmar!", "warning");
-        return;
-      }
-
+      const configText = document.getElementById('firebaseConfigInput').value.trim();
+      
       try {
-        const decoded = JSON.parse(decodeURIComponent(escape(atob(code))));
-        if (decoded.items && decoded.transactions) {
-          state.items = decoded.items;
-          state.transactions = decoded.transactions;
-          saveLocalData();
-          window.showAlert("⚡ Estoque e vendas atualizados com sucesso!", "success");
-          document.getElementById('inputImportCode').value = '';
-          render();
-        } else {
-          window.showAlert("Código inválido ou incompleto!", "error");
+        // Tenta extrair o objeto JSON das chaves
+        const cleanJson = configText.match(/\{[\s\S]*\}/);
+        if (!cleanJson) throw new Error("Formato inválido");
+        
+        const parsed = JSON.parse(cleanJson[0]);
+        if (!parsed.apiKey || !parsed.projectId) {
+          throw new Error("Chaves incompletas!");
         }
-      } catch (err) {
-        console.error(err);
-        window.showAlert("Erro ao processar o código. Certifique-se de copiar o texto completo.", "error");
+
+        localStorage.setItem('junina_firebase_config', JSON.stringify(parsed));
+        window.showAlert("Configuração salva! Recarregando sistema...", "success");
+        setTimeout(() => window.location.reload(), 1500);
+      } catch(err) {
+        window.showAlert("Texto inválido! Copie exatamente o objeto das configurações do Firebase.", "error");
       }
     };
 
-    // RENDERIZADOR PRINCIPAL DO APLICATIVO
+    window.clearFirebaseCredentials = function() {
+      localStorage.removeItem('junina_firebase_config');
+      window.showAlert("Credenciais limpas! Recarregando...", "info");
+      setTimeout(() => window.location.reload(), 1500);
+    };
+
+    window.toggleConfigModal = function() {
+      state.showConfigModal = !state.showConfigModal;
+      render();
+    };
+
+    // RENDERIZADOR COMPLETO
     function render() {
       const appEl = document.getElementById('app');
 
-      // Métricas calculadas em tempo real
       const totalFichasComunsVendidas = state.transactions
         .filter(t => t.type === 'VENDA_FICHA' && t.tokenType === 'Comum')
         .reduce((sum, t) => sum + (t.qty || 0), 0);
@@ -412,14 +545,13 @@
       const outOfStockItems = state.items.filter(item => item.stock === 0);
 
       appEl.innerHTML = `
-        <!-- Festive Top Header -->
+        <!-- Header -->
         <div class="bg-gradient-to-r from-amber-600 via-orange-500 to-red-600 text-white relative overflow-hidden shadow-lg">
           <div class="absolute top-0 left-0 w-full flex justify-around opacity-40 select-none pointer-events-none text-lg">
             <span>🔺</span><span class="text-yellow-300">🔻</span>
             <span>🔺</span><span class="text-yellow-200">🔻</span>
             <span>🔺</span><span class="text-yellow-300">🔻</span>
             <span>🔺</span><span class="text-yellow-100">🔻</span>
-            <span>🔺</span><span class="text-yellow-300">🔻</span>
           </div>
           
           <div class="max-w-4xl mx-auto px-4 py-5 text-center relative z-10">
@@ -431,7 +563,7 @@
               <span class="text-2xl animate-bounce">🌽</span>
             </div>
             <p class="text-[10px] md:text-xs text-orange-100 font-bold tracking-widest uppercase">
-              Controle Exclusivo de Fichas, Caixas e Baixa Rápida de Estoque
+              Caixa unificado de fichas & Baixa Simultânea de Estoque
             </p>
           </div>
         </div>
@@ -441,32 +573,32 @@
           <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-2 text-slate-600">
             <div class="flex items-center gap-2 font-medium">
               <span class="relative flex h-2 w-2">
-                <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                <span class="relative inline-flex rounded-full h-2 w-2 ${state.dbConnected ? 'bg-emerald-500' : 'bg-red-500 animate-pulse'}"></span>
               </span>
-              <span>📲 Sistema em Modo Local Ativo (Super Rápido)</span>
+              <span>
+                ${state.dbConnected 
+                  ? '📶 Sincronização Ativa (4 Celulares Conectados!)' 
+                  : '⚠️ Modo Offline Ativo. Clique em "Conectar Banco" para atualizar simultâneo.'}
+              </span>
             </div>
             
             <div class="flex items-center gap-2">
+              <button 
+                onclick="toggleConfigModal()"
+                class="bg-orange-600 hover:bg-orange-700 text-white font-extrabold px-2 py-0.5 rounded shadow-xs transition"
+              >
+                ${state.dbConnected ? '⚙️ Ver Conexão' : '⚡ Conectar Banco'}
+              </button>
+
               ${state.sellerName ? `
                 <button 
                   onclick="handleChangeRole()"
-                  class="flex items-center gap-1 bg-white px-2.5 py-0.5 rounded-full text-slate-700 font-bold shadow-xs transition"
+                  class="flex items-center gap-1 bg-white px-2 py-0.5 rounded text-slate-700 font-bold shadow-xs transition"
                 >
                   <i data-lucide="users" class="w-3 h-3 text-orange-600"></i>
                   <span>Operador: <strong class="text-orange-700">${state.sellerName}</strong></span>
-                  <span class="bg-orange-100 text-orange-800 text-[8px] px-1.5 py-0.25 rounded uppercase">
-                    ${state.operatorRole === 'CAIXA' ? 'Caixa' : state.operatorRole === 'BARRACA' ? 'Barraca' : 'Gestão'}
-                  </span>
-                  <span class="text-[9px] text-blue-600 underline ml-0.5">(Alterar)</span>
                 </button>
-              ` : `
-                <button 
-                  onclick="handleChangeRole()"
-                  class="bg-orange-500 text-white font-bold px-3 py-0.5 rounded-full"
-                >
-                  Identificar Operador
-                </button>
-              `}
+              ` : ''}
             </div>
           </div>
         </div>
@@ -486,6 +618,53 @@
           </div>
         ` : ''}
 
+        <!-- Firebase Config Modal/Screen -->
+        ${state.showConfigModal ? `
+          <div class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
+            <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border-2 border-orange-500 my-8">
+              <div class="flex justify-between items-center border-b pb-3 mb-4">
+                <h3 class="text-lg font-black text-orange-600">Ativar Sincronização em Tempo Real</h3>
+                <button onclick="toggleConfigModal()" class="text-slate-400 hover:text-slate-600 font-bold text-lg">✕</button>
+              </div>
+
+              <p class="text-xs text-slate-600 mb-4 leading-relaxed">
+                Para que os 4 celulares compartilhem o estoque de forma simultânea e evitem vender itens esgotados, precisamos de um banco de dados gratuito do Firebase. <strong>Leva apenas 3 minutos para criar:</strong>
+              </p>
+
+              <ol class="text-[11px] text-slate-600 space-y-2 mb-4 bg-orange-50 p-3 rounded-xl border border-orange-100 list-decimal pl-5">
+                <li>Acesse o site gratuito <a href="https://console.firebase.google.com" target="_blank" class="text-blue-600 font-bold underline">console.firebase.google.com</a></li>
+                <li>Clique em <strong>Adicionar Projeto</strong> e dê o nome de "Arraial".</li>
+                <li>Dentro do projeto, clique no ícone de <strong>Web App (&lt;/&gt;)</strong> para registrar o aplicativo.</li>
+                <li>Ative a opção <strong>Cloud Firestore</strong> no menu lateral esquerdo e clique em "Criar Banco de Dados" (Modo Teste).</li>
+                <li>Copie as chaves do seu Web App que se parecem com o campo abaixo e cole aqui:</li>
+              </ol>
+
+              <form onsubmit="saveFirebaseCredentials(event)" class="space-y-3">
+                <div>
+                  <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Cole aqui as chaves do Firebase:</label>
+                  <textarea
+                    id="firebaseConfigInput"
+                    placeholder="const firebaseConfig = { apiKey: '...', ... };"
+                    class="w-full h-24 p-2 border-2 border-orange-200 rounded-xl font-mono text-[10px] focus:outline-none focus:border-orange-500"
+                    required
+                  ></textarea>
+                </div>
+
+                <div class="flex gap-2 text-xs">
+                  <button type="submit" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 rounded-xl">
+                    Salvar e Sincronizar! ⚡
+                  </button>
+                  ${savedConfig ? `
+                    <button type="button" onclick="clearFirebaseCredentials()" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-xl">
+                      Limpar Conexão
+                    </button>
+                  ` : ''}
+                </div>
+              </form>
+            </div>
+          </div>
+        ` : ''}
+
         <!-- Delete Item Confirm Modal -->
         ${state.confirmDeleteData ? `
           <div class="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4">
@@ -497,18 +676,8 @@
                 Deseja mesmo remover o item <strong>"${state.confirmDeleteData.name}"</strong>? O produto sairá do estoque das barracas.
               </p>
               <div class="mt-4 flex gap-2 justify-end text-xs">
-                <button
-                  onclick="closeDeleteModal()"
-                  class="px-3 py-1.5 font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg"
-                >
-                  Voltar
-                </button>
-                <button
-                  onclick="executeDeleteItem()"
-                  class="px-3 py-1.5 font-bold bg-red-600 hover:bg-red-700 text-white rounded-lg"
-                >
-                  Deletar Item
-                </button>
+                <button onclick="closeDeleteModal()" class="px-3 py-1.5 font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg">Voltar</button>
+                <button onclick="executeDeleteItem()" class="px-3 py-1.5 font-bold bg-red-600 hover:bg-red-700 text-white rounded-lg">Deletar Item</button>
               </div>
             </div>
           </div>
@@ -530,7 +699,7 @@
                 </div>
                 <form onsubmit="handleSaveOperator(event)" class="space-y-3 text-xs">
                   <div>
-                    <label class="block text-[10px] font-bold text-slate-600 uppercase mb-1">Seu Nome / Função</label>
+                    <label class="block text-[10px] font-bold text-slate-600 uppercase mb-1">Seu Nome ou Barraca</label>
                     <input
                       id="inputSellerName"
                       type="text"
@@ -863,43 +1032,6 @@
           <!-- TAB: BALANCETE GERAL (ADMIN) -->
           ${state.activeTab === 'painel' ? `
             <div class="space-y-4">
-              <!-- Sincronização entre Dispositivos Offline -->
-              <div class="bg-white rounded-2xl border-2 border-dashed border-orange-500 p-4 shadow-sm text-xs">
-                <h3 class="font-extrabold text-orange-700 text-sm mb-1.5 flex items-center gap-1.5">
-                  <i data-lucide="arrow-right-left" class="w-4 h-4"></i>
-                  Sincronizar Celulares (WhatsApp)
-                </h3>
-                <p class="text-slate-500 mb-3 text-[11px]">
-                  Como estamos rodando offline sem Firebase, você pode copiar os dados deste celular e enviar no WhatsApp dos outros colaboradores para manter o estoque igualado na hora!
-                </p>
-
-                <div class="flex flex-col sm:flex-row gap-2">
-                  <button
-                    onclick="handleExportData()"
-                    class="flex-1 bg-orange-600 hover:bg-orange-700 text-white font-extrabold py-2 px-3 rounded-xl transition flex items-center justify-center gap-1"
-                  >
-                    <i data-lucide="copy" class="w-4 h-4"></i>
-                    Gerar Código de Envio
-                  </button>
-                  
-                  <form onsubmit="handleImportData(event)" class="flex-1 flex gap-1">
-                    <input
-                      id="inputImportCode"
-                      type="text"
-                      placeholder="Cole o código recebido aqui..."
-                      class="flex-1 px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-                      required
-                    />
-                    <button
-                      type="submit"
-                      class="bg-slate-800 hover:bg-slate-900 text-white font-bold py-1.5 px-3 rounded-lg text-xs"
-                    >
-                      Importar
-                    </button>
-                  </form>
-                </div>
-              </div>
-
               <!-- Auditoria Comparativa de Fichas -->
               <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs">
                 <h3 class="font-bold text-slate-800 text-xs mb-3">Auditoria de Caixa vs. Entregas Físicas</h3>
@@ -1010,7 +1142,7 @@
                             </div>
                           </td>
                           <td class="py-2.5 text-center">
-                            <button onclick="handleDeleteItem('${item.id}', '${item.name}')" class="text-red-500 hover:underline">Excluir</button>
+                            <button onclick="handleDeleteItem('${item.id}', '${item.name}')" class="text-red-500 hover:underline font-bold">Excluir</button>
                           </td>
                         </tr>
                       `).join('')}
@@ -1025,7 +1157,7 @@
           ${state.activeTab === 'historico_geral' ? `
             <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs text-xs">
               <h3 class="font-bold text-slate-800 text-xs mb-1">Histórico Local de Atividades</h3>
-              <p class="text-[10px] text-slate-500 mb-3">Veja o que foi registrado neste aparelho:</p>
+              <p class="text-[10px] text-slate-500 mb-3">Histórico de vendas e baixas dadas em tempo real:</p>
 
               ${state.transactions.length === 0 ? `
                 <p class="text-center py-6 text-slate-400">Nenhuma venda ou baixa registrada ainda.</p>
@@ -1033,8 +1165,8 @@
                 <div class="divide-y max-h-[50vh] overflow-y-auto pr-1">
                   ${state.transactions.slice(0, 50).map(tx => {
                     const isSale = tx.type === 'VENDA_FICHA';
-                    const timeString = tx.timestamp 
-                      ? new Date(tx.timestamp * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+                    const timeString = tx.timestamp?.seconds
+                      ? new Date(tx.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
                       : 'Agora';
 
                     return `
@@ -1060,8 +1192,8 @@
 
         <!-- Footer -->
         <footer class="text-center py-6 text-[10px] text-slate-400 border-t border-amber-100 mt-6 max-w-4xl mx-auto px-4">
-          <p class="font-bold text-slate-500">🌽 Olha a Fila! É verdade! 🌽</p>
-          <p class="mt-1">Sistema simples, veloz e sem travas na fogueira.</p>
+          <p class="font-bold text-slate-500">🌽 Olha a Sila! É verdade! 🌽</p>
+          <p class="mt-1">Sistema simples, veloz e integrado na fogueira.</p>
         </footer>
       `;
 
@@ -1071,11 +1203,8 @@
       }
     }
 
-    // Inicialização do carregamento offline
-    window.onload = function() {
-      loadLocalData();
-      render();
-    };
+    // Inicialização da conexão
+    tryConnectFirebase();
   </script>
 </body>
 </html>
