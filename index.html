@@ -21,7 +21,7 @@
   <!-- Lucide Icons CDN -->
   <script src="https://unpkg.com/lucide@latest"></script>
   <style>
-    /* Estilos extras para scrollbars e customizações */
+    /* Customização fina para scrollbars e interações em dispositivos móveis */
     .custom-scrollbar::-webkit-scrollbar {
       width: 6px;
     }
@@ -31,6 +31,10 @@
     .custom-scrollbar::-webkit-scrollbar-thumb {
       background: #f97316;
       border-radius: 10px;
+    }
+    /* Impedir zoom duplo acidental ao clicar rápido nos botões no celular */
+    button {
+      touch-action: manipulation;
     }
   </style>
 </head>
@@ -43,7 +47,7 @@
       <div class="text-center">
         <span class="text-6xl animate-bounce block mb-4">🔥</span>
         <h2 class="text-2xl font-black text-orange-600">Preparando o Arraial...</h2>
-        <p class="text-sm text-slate-500 mt-2">Carregando as barracas e fogueiras em tempo real.</p>
+        <p class="text-sm text-slate-500 mt-2">Carregando as barracas e conectando ao Firebase em tempo real.</p>
       </div>
     </div>
   </div>
@@ -54,33 +58,20 @@
     import { getFirestore, doc, collection, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
     import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 
-    // Tenta carregar as credenciais do Firebase salvas localmente
-    let savedConfig = null;
-    try {
-      const localConfig = localStorage.getItem('junina_firebase_config');
-      if (localConfig) {
-        savedConfig = JSON.parse(localConfig);
-      }
-    } catch(e) {
-      console.error("Erro ao ler credenciais salvas:", e);
-    }
-
-    // Cole suas credenciais aqui se preferir deixar fixo no código:
-    const hardcodedConfig = {
-  apiKey: "AIzaSyCXLbPDiYkTZaAnEcVYqL1xx4-YyLN6Bc4",
-  authDomain: "junina-43016.firebaseapp.com",
-  projectId: "junina-43016",
-  storageBucket: "junina-43016.firebasestorage.app",
-  messagingSenderId: "890358574405",
-  appId: "1:890358574405:web:a97eac65aa0167bca4a22c",
-  measurementId: "G-60G9P21VHP"
+    // Credenciais fornecidas pelo usuário para sincronização simultânea nos 4 aparelhos
+    const firebaseConfig = {
+      apiKey: "AIzaSyCXLbPDiYkTZaAnEcVYqL1xx4-YyLN6Bc4",
+      authDomain: "junina-43016.firebaseapp.com",
+      projectId: "junina-43016",
+      storageBucket: "junina-43016.firebasestorage.app",
+      messagingSenderId: "890358574405",
+      appId: "1:890358574405:web:a97eac65aa0167bca4a22c",
+      measurementId: "G-60G9P21VHP"
     };
-
-    const firebaseConfig = savedConfig || hardcodedConfig;
 
     const state = {
       dbConnected: false,
-      isSyncing: false,
+      isSyncing: true,
       operatorRole: localStorage.getItem('junina_role') || 'BARRACA',
       sellerName: localStorage.getItem('junina_seller_name') || '',
       isSettingName: !localStorage.getItem('junina_seller_name'),
@@ -92,11 +83,10 @@
       alertMessage: null,
       confirmDeleteData: null,
       paymentMethod: 'Dinheiro',
-      showConfigModal: false,
       appId: 'arraial-principal'
     };
 
-    // Itens padrão caso o banco de dados esteja vazio
+    // Itens padrão caso o banco de dados esteja totalmente vazio no primeiro uso
     const defaultItems = [
       { id: "1", name: "Salsichão", price: 5.00, stock: 50, category: "Comida" },
       { id: "2", name: "Pastel", price: 5.00, stock: 40, category: "Comida" },
@@ -108,16 +98,7 @@
     let db = null;
     let auth = null;
 
-    // Função para tentar conectar ao Firebase sem quebrar a página caso falte dados
     async function tryConnectFirebase() {
-      if (!firebaseConfig.apiKey) {
-        console.log("Firebase não configurado. Rodando em Modo de Demonstração Local.");
-        loadLocalFallbackData();
-        state.dbConnected = false;
-        render();
-        return;
-      }
-
       try {
         state.isSyncing = true;
         render();
@@ -126,32 +107,40 @@
         auth = getAuth(app);
         db = getFirestore(app);
 
-        await signInAnonymously(auth);
+        // Tenta fazer o login anônimo de forma isolada
+        try {
+          await signInAnonymously(auth);
+          console.log("Autenticação anônima realizada com sucesso!");
+        } catch (authErr) {
+          console.warn("Aviso de Autenticação:", authErr);
+          // NÃO interrompemos o fluxo! Se as regras do Firestore estiverem públicas,
+          // o sincronismo continuará funcionando normalmente mesmo sem Auth ativa.
+          showAlert("⚠️ Login anônimo pendente no painel. O sistema tentará sincronizar mesmo assim.", "warning");
+        }
         
         state.dbConnected = true;
         startRealtimeSync();
       } catch (err) {
-        console.error("Erro ao conectar no Firebase:", err);
-        showAlert("Falha na conexão simultânea. Rodando local por enquanto.", "warning");
+        console.error("Erro geral ao conectar no Firebase:", err);
         state.dbConnected = false;
         loadLocalFallbackData();
+        state.isSyncing = false;
         render();
+        showAlert("⚠️ Erro crítico. Rodando local temporariamente.", "error");
       }
     }
 
-    // Escuta alterações do banco em tempo real
     function startRealtimeSync() {
       const itemsCollection = collection(db, 'artifacts', state.appId, 'public', 'data', 'items');
       const transactionsCollection = collection(db, 'artifacts', state.appId, 'public', 'data', 'transactions');
 
-      // Escutar produtos
+      // Escuta em tempo real dos produtos cadastrados
       onSnapshot(itemsCollection, (snapshot) => {
         const list = [];
         snapshot.forEach((doc) => {
           list.push({ id: doc.id, ...doc.data() });
         });
 
-        // Se o banco estiver zerado no primeiro uso, inicializa com os produtos padrão
         if (list.length === 0) {
           defaultItems.forEach(async (item) => {
             await setDoc(doc(itemsCollection, item.id), item);
@@ -162,9 +151,12 @@
           state.isSyncing = false;
           render();
         }
+      }, (error) => {
+        console.error("Erro no fluxo de itens:", error);
+        showAlert("⚠️ Permissão negada ou banco offline. Verifique as regras do Firebase.", "error");
       });
 
-      // Escutar transações de vendas
+      // Escuta em tempo real das transações de vendas e baixas
       onSnapshot(transactionsCollection, (snapshot) => {
         const list = [];
         snapshot.forEach((doc) => {
@@ -177,10 +169,11 @@
         });
         state.transactions = list;
         render();
+      }, (error) => {
+        console.error("Erro no fluxo de transações:", error);
       });
     }
 
-    // Carregamento de salvaguarda local caso não use Firebase ainda
     function loadLocalFallbackData() {
       try {
         const localItems = localStorage.getItem('junina_local_items');
@@ -191,7 +184,6 @@
         state.items = defaultItems;
         state.transactions = [];
       }
-      state.isSyncing = false;
     }
 
     function saveLocalFallbackData() {
@@ -201,14 +193,13 @@
       }
     }
 
-    // Alertas personalizados
     window.showAlert = function(text, type = 'info') {
       state.alertMessage = { text, type };
       render();
       setTimeout(() => {
         state.alertMessage = null;
         render();
-      }, 4000);
+      }, 5000);
     };
 
     window.setActiveTab = function(tab) {
@@ -233,12 +224,11 @@
       render();
     };
 
-    // Identificação de usuário
     window.handleSaveOperator = function(e) {
       if (e) e.preventDefault();
       const inputName = document.getElementById('inputSellerName').value.trim();
       if (!inputName) {
-        window.showAlert("Por favor, digite seu nome ou barraca!", "warning");
+        window.showAlert("Por favor, digite seu nome ou o nome da sua barraca!", "warning");
         return;
       }
 
@@ -261,7 +251,6 @@
       render();
     };
 
-    // Venda de fichas
     window.handleSellTokens = async function(type, qty) {
       if (!state.sellerName) {
         state.isSettingName = true;
@@ -309,7 +298,6 @@
       window.showAlert(`🎟️ Vendido: ${q}x Ficha ${type} (R$ ${totalValue.toFixed(2)})!`, "success");
     };
 
-    // Entrega de produto física com baixa
     window.handleDeliverProduct = async function(itemId, qtyToDeliver) {
       if (!state.sellerName) {
         state.isSettingName = true;
@@ -328,7 +316,7 @@
       }
 
       if (item.stock < qtyToDeliver) {
-        window.showAlert(`⚠️ Apenas ${item.stock} unidades disponíveis!`, "warning");
+        window.showAlert(`⚠️ Apenas ${item.stock} unidades disponíveis no estoque!`, "warning");
         return;
       }
 
@@ -361,7 +349,7 @@
             timestamp: serverTimestamp()
           });
         } catch(e) {
-          window.showAlert("Erro ao dar baixa no servidor.", "error");
+          window.showAlert("Erro ao dar baixa no servidor de estoque.", "error");
         }
       } else {
         item.stock -= qtyToDeliver;
@@ -373,7 +361,6 @@
       window.showAlert(`✅ Entrega feita! Baixa de ${qtyToDeliver}x "${item.name}" registrada.`, "success");
     };
 
-    // Adicionar novo produto
     window.handleAddNewItem = async function(e) {
       if (e) e.preventDefault();
       const name = document.getElementById('newItemName').value.trim();
@@ -402,7 +389,7 @@
             createdAt: serverTimestamp()
           });
         } catch(e) {
-          window.showAlert("Erro ao salvar produto no banco.", "error");
+          window.showAlert("Erro ao salvar o produto no servidor.", "error");
         }
       } else {
         state.items.push(newItem);
@@ -411,12 +398,11 @@
         render();
       }
 
-      window.showAlert(`🎉 "${name}" inserido com sucesso!`, "success");
+      window.showAlert(`🎉 "${name}" inserido no cardápio de baixas!`, "success");
       document.getElementById('newItemName').value = '';
       document.getElementById('newItemStock').value = '';
     };
 
-    // Ajuste direto de estoque
     window.handleUpdateStockDirectly = async function(itemId, newStockValue, itemName) {
       const val = parseInt(newStockValue);
       if (isNaN(val) || val < 0) return;
@@ -426,7 +412,7 @@
           const itemDocRef = doc(db, 'artifacts', state.appId, 'public', 'data', 'items', itemId);
           await updateDoc(itemDocRef, { stock: val });
         } catch(e) {
-          window.showAlert("Erro ao atualizar no banco.", "error");
+          window.showAlert("Erro ao atualizar o estoque no servidor.", "error");
         }
       } else {
         const item = state.items.find(i => i.id === itemId);
@@ -457,7 +443,7 @@
           const itemDocRef = doc(db, 'artifacts', state.appId, 'public', 'data', 'items', state.confirmDeleteData.id);
           await deleteDoc(itemDocRef);
         } catch(e) {
-          window.showAlert("Erro ao deletar do banco.", "error");
+          window.showAlert("Erro ao excluir do servidor.", "error");
         }
       } else {
         state.items = state.items.filter(i => i.id !== state.confirmDeleteData.id);
@@ -469,41 +455,6 @@
       render();
     };
 
-    // Salvar credenciais recebidas na tela
-    window.saveFirebaseCredentials = function(e) {
-      if (e) e.preventDefault();
-      const configText = document.getElementById('firebaseConfigInput').value.trim();
-      
-      try {
-        // Tenta extrair o objeto JSON das chaves
-        const cleanJson = configText.match(/\{[\s\S]*\}/);
-        if (!cleanJson) throw new Error("Formato inválido");
-        
-        const parsed = JSON.parse(cleanJson[0]);
-        if (!parsed.apiKey || !parsed.projectId) {
-          throw new Error("Chaves incompletas!");
-        }
-
-        localStorage.setItem('junina_firebase_config', JSON.stringify(parsed));
-        window.showAlert("Configuração salva! Recarregando sistema...", "success");
-        setTimeout(() => window.location.reload(), 1500);
-      } catch(err) {
-        window.showAlert("Texto inválido! Copie exatamente o objeto das configurações do Firebase.", "error");
-      }
-    };
-
-    window.clearFirebaseCredentials = function() {
-      localStorage.removeItem('junina_firebase_config');
-      window.showAlert("Credenciais limpas! Recarregando...", "info");
-      setTimeout(() => window.location.reload(), 1500);
-    };
-
-    window.toggleConfigModal = function() {
-      state.showConfigModal = !state.showConfigModal;
-      render();
-    };
-
-    // RENDERIZADOR COMPLETO
     function render() {
       const appEl = document.getElementById('app');
 
@@ -546,13 +497,14 @@
       const outOfStockItems = state.items.filter(item => item.stock === 0);
 
       appEl.innerHTML = `
-        <!-- Header -->
+        <!-- Header Festivo -->
         <div class="bg-gradient-to-r from-amber-600 via-orange-500 to-red-600 text-white relative overflow-hidden shadow-lg">
           <div class="absolute top-0 left-0 w-full flex justify-around opacity-40 select-none pointer-events-none text-lg">
             <span>🔺</span><span class="text-yellow-300">🔻</span>
             <span>🔺</span><span class="text-yellow-200">🔻</span>
             <span>🔺</span><span class="text-yellow-300">🔻</span>
             <span>🔺</span><span class="text-yellow-100">🔻</span>
+            <span>🔺</span><span class="text-yellow-300">🔻</span>
           </div>
           
           <div class="max-w-4xl mx-auto px-4 py-5 text-center relative z-10">
@@ -569,7 +521,7 @@
           </div>
         </div>
 
-        <!-- Connection and Configuration Header Bar -->
+        <!-- Connection and Status Bar -->
         <div class="bg-amber-100 border-b border-amber-200 py-1.5 px-4 text-[11px]">
           <div class="max-w-4xl mx-auto flex flex-col sm:flex-row justify-between items-center gap-2 text-slate-600">
             <div class="flex items-center gap-2 font-medium">
@@ -578,23 +530,16 @@
               </span>
               <span>
                 ${state.dbConnected 
-                  ? '📶 Sincronização Ativa (4 Celulares Conectados!)' 
-                  : '⚠️ Modo Offline Ativo. Clique em "Conectar Banco" para atualizar simultâneo.'}
+                  ? '📶 Sincronização em Tempo Real Ativa (Conectado ao Firebase!)' 
+                  : '⚠️ Conectando ao Banco...'}
               </span>
             </div>
             
             <div class="flex items-center gap-2">
-              <button 
-                onclick="toggleConfigModal()"
-                class="bg-orange-600 hover:bg-orange-700 text-white font-extrabold px-2 py-0.5 rounded shadow-xs transition"
-              >
-                ${state.dbConnected ? '⚙️ Ver Conexão' : '⚡ Conectar Banco'}
-              </button>
-
               ${state.sellerName ? `
                 <button 
                   onclick="handleChangeRole()"
-                  class="flex items-center gap-1 bg-white px-2 py-0.5 rounded text-slate-700 font-bold shadow-xs transition"
+                  class="flex items-center gap-1 bg-white px-2 py-0.5 rounded text-slate-700 font-bold shadow-xs hover:bg-slate-50 transition"
                 >
                   <i data-lucide="users" class="w-3 h-3 text-orange-600"></i>
                   <span>Operador: <strong class="text-orange-700">${state.sellerName}</strong></span>
@@ -606,7 +551,7 @@
 
         <!-- Pop-up Alerts -->
         ${state.alertMessage ? `
-          <div class="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 w-11/12 max-w-sm shadow-2xl rounded-2xl overflow-hidden animate-bounce">
+          <div class="fixed top-4 left-1/2 transform -translate-x-1/2 z-50 w-11/12 max-w-sm shadow-2xl rounded-2xl overflow-hidden">
             <div class="p-4 flex items-center justify-between text-white font-bold ${
               state.alertMessage.type === 'success' ? 'bg-emerald-600' :
               state.alertMessage.type === 'error' ? 'bg-red-600' :
@@ -615,53 +560,6 @@
               <div class="flex items-center gap-2">
                 <span class="text-xs md:text-sm">${state.alertMessage.text}</span>
               </div>
-            </div>
-          </div>
-        ` : ''}
-
-        <!-- Firebase Config Modal/Screen -->
-        ${state.showConfigModal ? `
-          <div class="fixed inset-0 bg-slate-900/80 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto">
-            <div class="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border-2 border-orange-500 my-8">
-              <div class="flex justify-between items-center border-b pb-3 mb-4">
-                <h3 class="text-lg font-black text-orange-600">Ativar Sincronização em Tempo Real</h3>
-                <button onclick="toggleConfigModal()" class="text-slate-400 hover:text-slate-600 font-bold text-lg">✕</button>
-              </div>
-
-              <p class="text-xs text-slate-600 mb-4 leading-relaxed">
-                Para que os 4 celulares compartilhem o estoque de forma simultânea e evitem vender itens esgotados, precisamos de um banco de dados gratuito do Firebase. <strong>Leva apenas 3 minutos para criar:</strong>
-              </p>
-
-              <ol class="text-[11px] text-slate-600 space-y-2 mb-4 bg-orange-50 p-3 rounded-xl border border-orange-100 list-decimal pl-5">
-                <li>Acesse o site gratuito <a href="https://console.firebase.google.com" target="_blank" class="text-blue-600 font-bold underline">console.firebase.google.com</a></li>
-                <li>Clique em <strong>Adicionar Projeto</strong> e dê o nome de "Arraial".</li>
-                <li>Dentro do projeto, clique no ícone de <strong>Web App (&lt;/&gt;)</strong> para registrar o aplicativo.</li>
-                <li>Ative a opção <strong>Cloud Firestore</strong> no menu lateral esquerdo e clique em "Criar Banco de Dados" (Modo Teste).</li>
-                <li>Copie as chaves do seu Web App que se parecem com o campo abaixo e cole aqui:</li>
-              </ol>
-
-              <form onsubmit="saveFirebaseCredentials(event)" class="space-y-3">
-                <div>
-                  <label class="block text-[10px] font-bold text-slate-500 uppercase mb-1">Cole aqui as chaves do Firebase:</label>
-                  <textarea
-                    id="firebaseConfigInput"
-                    placeholder="const firebaseConfig = { apiKey: '...', ... };"
-                    class="w-full h-24 p-2 border-2 border-orange-200 rounded-xl font-mono text-[10px] focus:outline-none focus:border-orange-500"
-                    required
-                  ></textarea>
-                </div>
-
-                <div class="flex gap-2 text-xs">
-                  <button type="submit" class="flex-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-2 rounded-xl">
-                    Salvar e Sincronizar! ⚡
-                  </button>
-                  ${savedConfig ? `
-                    <button type="button" onclick="clearFirebaseCredentials()" class="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-3 rounded-xl">
-                      Limpar Conexão
-                    </button>
-                  ` : ''}
-                </div>
-              </form>
             </div>
           </div>
         ` : ''}
@@ -684,7 +582,6 @@
           </div>
         ` : ''}
 
-        <!-- MAIN APPLICATION CONTAINER -->
         <main class="max-w-4xl mx-auto px-3 py-4">
 
           <!-- Initial Operator Selection Overlap -->
@@ -921,7 +818,7 @@
                     </div>
                     <div class="mt-3 grid grid-cols-5 gap-1">
                       ${[1, 2, 3, 5, 10].map(n => `
-                        <button onclick="handleSellTokens('Comum', ${n})" class="bg-white hover:bg-amber-100 text-slate-800 border border-amber-300 py-1.5 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
+                        <button onclick="handleSellTokens('Comum', ${n})" class="bg-white hover:bg-amber-100 text-slate-800 border border-amber-300 py-1.5 rounded-lg text-xs font-black active:scale-95 transition hover:bg-amber-50">+${n}</button>
                       `).join('')}
                     </div>
                   </div>
@@ -936,7 +833,7 @@
                     </div>
                     <div class="mt-3 grid grid-cols-5 gap-1">
                       ${[1, 2, 3, 5, 10].map(n => `
-                        <button onclick="handleSellTokens('Especial', ${n})" class="bg-white hover:bg-red-100 text-slate-800 border border-red-300 py-1.5 rounded-lg text-xs font-black active:scale-95 transition">+${n}</button>
+                        <button onclick="handleSellTokens('Especial', ${n})" class="bg-white hover:bg-red-100 text-slate-800 border border-red-300 py-1.5 rounded-lg text-xs font-black active:scale-95 transition hover:bg-red-50">+${n}</button>
                       `).join('')}
                     </div>
                   </div>
@@ -1157,8 +1054,8 @@
           <!-- TAB: ATIVIDADES / LOGS -->
           ${state.activeTab === 'historico_geral' ? `
             <div class="bg-white rounded-xl border border-amber-200 p-3 shadow-xs text-xs">
-              <h3 class="font-bold text-slate-800 text-xs mb-1">Histórico Local de Atividades</h3>
-              <p class="text-[10px] text-slate-500 mb-3">Histórico de vendas e baixas dadas em tempo real:</p>
+              <h3 class="font-bold text-slate-800 text-xs mb-1">Linha do Tempo de Atividades</h3>
+              <p class="text-[10px] text-slate-500 mb-3">Histórico de vendas e baixas atualizado em tempo real:</p>
 
               ${state.transactions.length === 0 ? `
                 <p class="text-center py-6 text-slate-400">Nenhuma venda ou baixa registrada ainda.</p>
@@ -1167,7 +1064,7 @@
                   ${state.transactions.slice(0, 50).map(tx => {
                     const isSale = tx.type === 'VENDA_FICHA';
                     const timeString = tx.timestamp?.seconds
-                      ? new Date(tx.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})
+                      ? new Date(tx.timestamp.seconds * 1000).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'})
                       : 'Agora';
 
                     return `
@@ -1194,11 +1091,11 @@
         <!-- Footer -->
         <footer class="text-center py-6 text-[10px] text-slate-400 border-t border-amber-100 mt-6 max-w-4xl mx-auto px-4">
           <p class="font-bold text-slate-500">🌽 Olha a Sila! É verdade! 🌽</p>
-          <p class="mt-1">Sistema simples, veloz e integrado na fogueira.</p>
+          <p class="mt-1">Sistema simples, veloz e integrado em tempo real no seu Firebase.</p>
         </footer>
       `;
 
-      // Recria ícones
+      // Recria ícones do Lucide reativamente
       if (window.lucide) {
         window.lucide.createIcons();
       }
